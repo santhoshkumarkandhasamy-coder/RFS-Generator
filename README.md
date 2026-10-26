@@ -26,7 +26,15 @@ Open http://localhost:8501. On Windows you can simply double-click `run_app.bat`
 3. **Mapping review** - every ledger gets a suggested note line ("Masters") from Tally group names and keywords, separately for debit and credit balances. Correct anything, press *Save mapping*, and download the mapping JSON to reuse next time.
 4. **Shareholders & ageing** - register of members (promoter flag) and receivables / payables ageing.
 5. **Adjustments** - restatement journal entries in lakhs (entry no., date, master, Dr, Cr, narration).
-6. **Generate** - download the RFS workbook; save the project JSON to come back later.
+6. **Generate** - choose output formats and download:
+   - **Excel (.xlsx)** - the formula-linked RFS workbook
+   - **Word (.docx / .doc)** - all annexures and notes as a document
+   - **PowerPoint (.pptx)** - summary deck (statements, adjustments, ratios, capitalisation)
+   - **HTML** - single-page report with a sheet index
+
+   Save the project JSON to come back later (the sidebar upload is only for re-opening a saved project).
+
+Word / PowerPoint / HTML are rendered from calculated figures, so the app needs **LibreOffice** installed, or **Microsoft Excel** on Windows (via `pywin32`, installed from requirements). `.doc` uses LibreOffice or Microsoft Word.
 
 ## Code
 
@@ -37,6 +45,7 @@ Open http://localhost:8501. On Windows you can simply double-click `run_app.bat`
 | `rfs/classify.py` | Rules: Tally group / ledger name -> Schedule III classification |
 | `rfs/mapping.py` | Masters (note lines), suggestions, overrides |
 | `rfs/builder.py` | Writes the workbook |
+| `rfs/exporters.py` | Recalculates and exports to Word, PowerPoint and HTML |
 | `tests/smoke_test.py` | Builds a workbook from three TBs with a minimal config |
 
 ## Notes / limits

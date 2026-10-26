@@ -7,14 +7,12 @@ Run:  streamlit run app.py
 import datetime as dt
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 
 import pandas as pd
 import streamlit as st
 
-from rfs import tally, builder, mapping
+from rfs import tally, builder, mapping, exporters
 
 st.set_page_config(page_title="RFS Generator", layout="wide")
 SLOTS = [("FY26", "Latest year"), ("FY25", "Previous year"), ("FY24", "Earliest year")]
@@ -39,7 +37,8 @@ def P(key, default=None):
 with st.sidebar:
     st.header("RFS Generator")
     st.caption("SEBI ICDR - Indian GAAP - Schedule III Division I")
-    up = st.file_uploader("Load saved project (.json)", type="json", key="projup")
+    up = st.file_uploader("Reload a saved project (optional, .json)", type="json", key="projup",
+                          help="Only for re-opening a project saved from the Generate tab. Trial balances are uploaded in tab 2.")
     if up is not None and ss.get("_loaded") != up.name:
         proj = json.load(up)
         ss.project = proj.get("project", {})
@@ -245,41 +244,63 @@ with tabs[5]:
         if bad: problems.append("Unknown masters in mapping: " + ", ".join(sorted(bad)))
     for p_ in problems:
         st.warning(p_)
-    if st.button("Generate RFS workbook", type="primary", disabled=bool(problems)):
+    FORMATS = {"Excel (.xlsx)": "xlsx", "Word (.docx)": "docx", "Word 97-2003 (.doc)": "doc", "PowerPoint (.pptx)": "pptx", "HTML (.html)": "html"}
+    engine = exporters.recalc_engine()
+    chosen = st.multiselect("Output formats", list(FORMATS), default=["Excel (.xlsx)"])
+    if engine:
+        st.caption(f"Word / PowerPoint / HTML are produced from the calculated figures (recalculated with {engine}).")
+    elif any(FORMATS[c] != "xlsx" for c in chosen):
+        problems.append("Word / PowerPoint / HTML need LibreOffice installed (or Microsoft Excel with the pywin32 package on Windows).")
+        st.warning(problems[-1])
+    if st.button("Generate RFS", type="primary", disabled=bool(problems) or not chosen):
         cfg = dict(ss.project)
         cfg["years"] = years
         cfg["adjustments"] = getattr(ss, "entries", [])
         cfg["directors"] = [d for d in cfg.get("directors", []) if d.get("name")]
         cfg["shareholders"] = [h for h in cfg.get("shareholders", []) if h.get("name")]
-        out = os.path.join(ss.workdir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{fy_label(years['d26'])[3:]}.xlsx")
+        run_dir = tempfile.mkdtemp(dir=ss.workdir)
+        out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{fy_label(years['d26'])[3:]}.xlsx")
         with st.spinner("Building workbook..."):
             builder.build(cfg, ss.tb, ss.tbfile, out, ss.overrides)
-        soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if soffice:
-            with st.spinner("Recalculating to show key figures..."):
-                try:
-                    subprocess.run([soffice, "--headless", "--convert-to", "xlsx", "--outdir", os.path.join(ss.workdir, "calc"), out],
-                                   check=True, timeout=300, capture_output=True)
-                    import openpyxl
-                    v = openpyxl.load_workbook(os.path.join(ss.workdir, "calc", os.path.basename(out)), data_only=True)
-                    bs, pl = v["BS_1"], v["PL_2"]
-                    rows_ = []
-                    for r in range(9, 60):
-                        lab = bs[f"B{r}"].value
-                        if lab and isinstance(bs[f"D{r}"].value, (int, float)) and "Total" in str(lab):
-                            rows_.append([lab, bs[f"D{r}"].value, bs[f"E{r}"].value, bs[f"F{r}"].value])
-                    for r in range(8, 32):
-                        lab = pl[f"B{r}"].value
-                        if lab and isinstance(pl[f"D{r}"].value, (int, float)) and any(k in str(lab) for k in ("Revenue", "Profit", "Total")):
-                            rows_.append([lab, pl[f"D{r}"].value, pl[f"E{r}"].value, pl[f"F{r}"].value])
-                    cols_ = ["Line (Rs. lakhs)", fy_label(years["d26"]), fy_label(years["d25"]), fy_label(years["d24"])]
-                    st.dataframe(pd.DataFrame(rows_, columns=cols_), width="stretch", hide_index=True,
-                                 column_config={c: st.column_config.NumberColumn(format="%.2f") for c in cols_[1:]})
-                    diff = [bs[f"{c}1"].value for c in "DEF"]
-                    (st.success if all(abs(d or 0) < 0.01 for d in diff) else st.error)(f"Balance sheet difference: {diff}")
-                    out = os.path.join(ss.workdir, "calc", os.path.basename(out))
-                except Exception as e:  # recalculation is only a preview; Excel recalculates on open
-                    st.info(f"Preview not available ({e}). The workbook recalculates when opened in Excel.")
-        with open(out, "rb") as fh:
-            st.download_button("Download RFS workbook", fh.read(), os.path.basename(out), type="primary")
-        st.caption("Open in Excel; every figure is a formula linked to the TB sheets. Review the yellow input cells and the grey check cells.")
+        with st.spinner("Preparing output files..."):
+            try:
+                ss.outputs = exporters.export_all(out, [FORMATS[c] for c in chosen], os.path.join(run_dir, "out"), name)
+            except Exception as e:
+                st.error(f"Export failed: {e}")
+                ss.outputs = {"xlsx": out} if "Excel (.xlsx)" in chosen else {}
+        calc = ss.outputs.get("_calc")
+        ss.preview = None
+        if calc:
+            import openpyxl
+            v = openpyxl.load_workbook(calc, data_only=True)
+            bs, pl = v["BS_1"], v["PL_2"]
+            rows_ = []
+            for r in range(9, 60):
+                lab = bs[f"B{r}"].value
+                if lab and isinstance(bs[f"D{r}"].value, (int, float)) and "Total" in str(lab):
+                    rows_.append([lab, bs[f"D{r}"].value, bs[f"E{r}"].value, bs[f"F{r}"].value])
+            for r in range(8, 32):
+                lab = pl[f"B{r}"].value
+                if lab and isinstance(pl[f"D{r}"].value, (int, float)) and any(k in str(lab) for k in ("Revenue", "Profit", "Total")):
+                    rows_.append([lab, pl[f"D{r}"].value, pl[f"E{r}"].value, pl[f"F{r}"].value])
+            ss.preview = (rows_, [bs[f"{c}1"].value for c in "DEF"])
+
+    if ss.get("preview"):
+        rows_, diff = ss.preview
+        cols_ = ["Line (Rs. lakhs)", fy_label(years["d26"]), fy_label(years["d25"]), fy_label(years["d24"])]
+        st.dataframe(pd.DataFrame(rows_, columns=cols_), width="stretch", hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="%.2f") for c in cols_[1:]})
+        (st.success if all(abs(d or 0) < 0.01 for d in diff) else st.error)(f"Balance sheet difference: {diff}")
+    if ss.get("outputs") and any(not k.startswith("_") for k in ss.outputs):
+        st.subheader("Downloads")
+        mime = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "doc": "application/msword",
+                "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "html": "text/html"}
+        label = {"xlsx": "Excel workbook", "docx": "Word document", "doc": "Word 97-2003 document", "pptx": "PowerPoint summary", "html": "HTML report"}
+        files = {k: v for k, v in ss.outputs.items() if not k.startswith("_")}
+        cols = st.columns(len(files))
+        for col, (fmt, path) in zip(cols, files.items()):
+            with open(path, "rb") as fh:
+                col.download_button(f"Download {label[fmt]}", fh.read(), os.path.basename(path), mime=mime[fmt], key="dl_" + fmt)
+        st.caption("Excel: every figure is a formula linked to the TB sheets - review the yellow input cells and grey check cells. "
+                   "Word / HTML carry all annexures and notes; PowerPoint is a summary deck (statements, adjustments, ratios, capitalisation).")
