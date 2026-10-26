@@ -265,12 +265,42 @@ with reg_tab:
             with st.expander("Technical detail"):
                 st.code(e)
         if of["items"]:
-            df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "Link": i["url"]} for i in of["items"]])
+            items = of["items"]
+            cache = regulatory.load_location_cache()
+            for it in items:                         # locations already found earlier (cached on this PC)
+                if it["url"] in cache:
+                    it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address")})
+            missing = [it for it in items if it["url"] not in cache]
+            lc1, lc2 = st.columns([3, 2])
+            lc1.caption("SEBI lists only the company name. To filter by state, the app reads the registered office "
+                        "on the cover page of each offer document (downloads each PDF once; results are remembered on this PC).")
+            if missing and lc2.button(f"Find company locations ({len(missing)} filings)"):
+                bar = st.progress(0.0, text="Reading cover pages...")
+                regulatory.locate_all(items, ss.workdir, cache, progress=lambda d, n: bar.progress(d / n, text=f"Reading cover pages... {d}/{n}"))
+                bar.empty()
+                st.rerun()
+
+            f1, f2 = st.columns(2)
+            states = sorted({it.get("state") for it in items if it.get("state")})
+            sel_states = f1.multiselect("State", states, key="flt_state")
+            word = f2.text_input("Company name contains", key="flt_word")
+            shown = [it for it in items if (not sel_states or it.get("state") in sel_states)
+                     and (not word or word.lower() in it["title"].lower())]
+            if sel_states and missing:
+                st.caption(f"{len(missing)} filing(s) have no location yet and are hidden by the filter - press Find company locations.")
+
+            df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "State": i.get("state", ""), "Link": i["url"]} for i in shown])
             st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
-            pick = st.selectbox("Use as format reference (downloads the offer document PDF and compares it)",
-                                ["-"] + [f"{i['date']} | {i['source']} | {i['title']}" for i in of["items"]])
+            located = [it for it in items if it.get("state")]
+            if located:
+                with st.expander("State-wise summary", expanded=True):
+                    sm = pd.DataFrame([{"State": it["state"], "Type": it["source"]} for it in located])
+                    st.dataframe(sm.pivot_table(index="State", columns="Type", aggfunc="size", fill_value=0).assign(Total=lambda d: d.sum(axis=1))
+                                 .sort_values("Total", ascending=False), width="stretch")
+            labels = [f"{i['date']} | {i['source']} | {i['title']}" + (f" | {i['state']}" if i.get("state") else "") for i in shown]
+            pick = st.selectbox("Use as format reference (downloads the offer document PDF and compares it)", ["-"] + labels)
             if pick != "-" and st.button("Download and compare"):
-                it = of["items"][[f"{i['date']} | {i['source']} | {i['title']}" for i in of["items"]].index(pick)]
+                it = shown[labels.index(pick)]
                 try:
                     with st.spinner("Finding the PDF on the filing page..."):
                         links = regulatory.pdf_links(it["url"])
@@ -280,7 +310,8 @@ with reg_tab:
                         p = os.path.join(ss.workdir, "reference_offer_document.pdf")
                         with st.spinner("Downloading (offer documents are large)..."):
                             regulatory.download(links[0], p)
-                        ss.regcheck["reference"] = {"name": it["title"], "type": it["source"], "url": links[0], "date": str(it["date"]),
+                        ss.regcheck["reference"] = {"name": it["title"] + (f" ({it['state']})" if it.get("state") else ""),
+                                                    "type": it["source"], "url": links[0], "date": str(it["date"]),
                                                     "analysis": regulatory.analyse_offer_document(p)}
                 except Exception as e:
                     st.warning(f"Download failed ({e}). Download the PDF from the link and upload it below.")

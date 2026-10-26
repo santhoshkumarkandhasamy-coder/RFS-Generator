@@ -8,6 +8,8 @@ Listing pages are read live (internet needed). If a page cannot be read, the app
 manually; URLs can be changed in the app (Settings) if SEBI moves a page.
 """
 import datetime as dt
+import json
+import os
 import re
 
 FORMAT_REVIEWED_ON = dt.date(2026, 10, 26)   # date the RFS layout in builder.py was last reviewed against ICDR / recent DRHPs
@@ -188,6 +190,174 @@ def download(url, path):
             for chunk in r.iter_content(1 << 16):
                 fh.write(chunk)
     return path
+
+
+# ------------------------------------------------------------------ company location (registered office on the cover page)
+STATES = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh",
+          "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha",
+          "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal",
+          "Andaman and Nicobar Islands", "Chandigarh", "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Jammu and Kashmir",
+          "Ladakh", "Lakshadweep", "Puducherry"]
+_STATE_ALIASES = {"orissa": "Odisha", "pondicherry": "Puducherry", "new delhi": "Delhi", "nct of delhi": "Delhi", "uttaranchal": "Uttarakhand",
+                  "tamilnadu": "Tamil Nadu", "t.n.": "Tamil Nadu", "j&k": "Jammu and Kashmir", "daman": "Dadra and Nagar Haveli and Daman and Diu",
+                  "silvassa": "Dadra and Nagar Haveli and Daman and Diu"}
+CITIES = {"mumbai": "Maharashtra", "thane": "Maharashtra", "navi mumbai": "Maharashtra", "pune": "Maharashtra", "nagpur": "Maharashtra",
+          "nashik": "Maharashtra", "aurangabad": "Maharashtra", "chennai": "Tamil Nadu", "coimbatore": "Tamil Nadu", "madurai": "Tamil Nadu",
+          "tiruppur": "Tamil Nadu", "salem": "Tamil Nadu", "trichy": "Tamil Nadu", "tiruchirappalli": "Tamil Nadu", "erode": "Tamil Nadu",
+          "hosur": "Tamil Nadu", "bengaluru": "Karnataka", "bangalore": "Karnataka", "mysuru": "Karnataka", "mysore": "Karnataka",
+          "mangaluru": "Karnataka", "hubli": "Karnataka", "hyderabad": "Telangana", "secunderabad": "Telangana", "visakhapatnam": "Andhra Pradesh",
+          "vijayawada": "Andhra Pradesh", "kochi": "Kerala", "cochin": "Kerala", "ernakulam": "Kerala", "thiruvananthapuram": "Kerala",
+          "kozhikode": "Kerala", "thrissur": "Kerala", "ahmedabad": "Gujarat", "surat": "Gujarat", "vadodara": "Gujarat", "rajkot": "Gujarat",
+          "gandhinagar": "Gujarat", "jaipur": "Rajasthan", "jodhpur": "Rajasthan", "udaipur": "Rajasthan", "kolkata": "West Bengal",
+          "howrah": "West Bengal", "noida": "Uttar Pradesh", "ghaziabad": "Uttar Pradesh", "lucknow": "Uttar Pradesh", "kanpur": "Uttar Pradesh",
+          "gurugram": "Haryana", "gurgaon": "Haryana", "faridabad": "Haryana", "indore": "Madhya Pradesh", "bhopal": "Madhya Pradesh",
+          "ludhiana": "Punjab", "mohali": "Punjab", "bhubaneswar": "Odisha", "patna": "Bihar", "ranchi": "Jharkhand", "raipur": "Chhattisgarh",
+          "guwahati": "Assam", "dehradun": "Uttarakhand", "new delhi": "Delhi", "delhi": "Delhi", "panaji": "Goa", "chandigarh": "Chandigarh"}
+# first two digits of the PIN code -> state (used only when the address names no state)
+_PIN = {"11": "Delhi", "12": "Haryana", "13": "Haryana", "14": "Punjab", "15": "Punjab", "16": "Chandigarh", "17": "Himachal Pradesh",
+        "18": "Jammu and Kashmir", "19": "Jammu and Kashmir", "20": "Uttar Pradesh", "21": "Uttar Pradesh", "22": "Uttar Pradesh",
+        "23": "Uttar Pradesh", "24": "Uttarakhand", "25": "Uttar Pradesh", "26": "Uttar Pradesh", "27": "Uttar Pradesh", "28": "Uttar Pradesh",
+        "30": "Rajasthan", "31": "Rajasthan", "32": "Rajasthan", "33": "Rajasthan", "34": "Rajasthan", "36": "Gujarat", "37": "Gujarat",
+        "38": "Gujarat", "39": "Gujarat", "40": "Maharashtra", "41": "Maharashtra", "42": "Maharashtra", "43": "Maharashtra", "44": "Maharashtra",
+        "45": "Madhya Pradesh", "46": "Madhya Pradesh", "47": "Madhya Pradesh", "48": "Madhya Pradesh", "49": "Chhattisgarh",
+        "50": "Telangana", "51": "Andhra Pradesh", "52": "Andhra Pradesh", "53": "Andhra Pradesh", "56": "Karnataka", "57": "Karnataka",
+        "58": "Karnataka", "59": "Karnataka", "60": "Tamil Nadu", "61": "Tamil Nadu", "62": "Tamil Nadu", "63": "Tamil Nadu", "64": "Tamil Nadu",
+        "67": "Kerala", "68": "Kerala", "69": "Kerala", "70": "West Bengal", "71": "West Bengal", "72": "West Bengal", "73": "West Bengal",
+        "74": "West Bengal", "75": "Odisha", "76": "Odisha", "77": "Odisha", "78": "Assam", "80": "Bihar", "81": "Bihar", "82": "Jharkhand",
+        "83": "Jharkhand", "84": "Bihar", "85": "Bihar"}
+
+
+def extract_location(text):
+    """Registered office address -> {address, city, state, pin}. Reads the 'Registered Office' block of a DRHP / RHP cover page."""
+    t = re.sub(r"[ \t]+", " ", text or "")
+    m = re.search(r"registered (and corporate )?office\s*[:\-]?\s*(.{20,400}?)(?:\n\s*\n|corporate office|contact person|telephone|tel\s*[:.]|e-?mail|website|$)",
+                  t, re.I | re.S)
+    block = re.sub(r"\s+", " ", m.group(2)).strip(" ,;") if m else ""
+    hay = (block or t[:6000]).lower()
+    state = next((s_ for s_ in sorted(STATES, key=len, reverse=True) if s_.lower() in hay), None)
+    if not state:
+        state = next((v for k, v in _STATE_ALIASES.items() if k in hay), None)
+    city = next((c.title() for c in sorted(CITIES, key=len, reverse=True) if re.search(r"\b" + re.escape(c) + r"\b", hay)), "")
+    pin_m = re.search(r"\b([1-8]\d{2})\s?(\d{3})\b", block) or (None if block else re.search(r"\b([1-8]\d{2})\s?(\d{3})\b", hay))
+    pin = (pin_m.group(1) + pin_m.group(2)) if pin_m else ""
+    if not state and city:
+        state = CITIES[city.lower()]
+    if not state and pin:
+        state = _PIN.get(pin[:2])
+    if not city and block:   # the word just before the PIN / state is usually the city
+        mm = re.search(r"([A-Za-z][A-Za-z .]{2,30}?)\s*[-,]?\s*(?:\d{3}\s?\d{3})", block)
+        if mm:
+            city = mm.group(1).strip(" ,.-").split(",")[-1].strip().title()
+    dm = re.search(r"\b(?:district|dist\.?)\s*[:\-]?\s*([A-Za-z][A-Za-z .]{2,30}?)(?=\s*[-,]|\s*\d|$)", block, re.I)
+    district = dm.group(1).strip(" .").title() if dm else ""
+    return {"address": block[:300], "city": city, "district": district, "state": state or "", "pin": pin}
+
+
+PIN_API = "https://api.postalpincode.in/pincode/{pin}"   # India Post PIN directory (free, no key)
+_pin_cache = {}
+
+
+def pin_lookup(pin):
+    """Official district and state of a PIN code from India Post. Returns {} if it cannot be reached."""
+    if not pin or len(pin) != 6:
+        return {}
+    if pin in _pin_cache:
+        return _pin_cache[pin]
+    out = {}
+    try:
+        import requests
+        r = requests.get(PIN_API.format(pin=pin), timeout=15, headers={"User-Agent": "Mozilla/5.0 (RFS Generator)"})
+        data = r.json()
+        po = (data[0].get("PostOffice") or []) if data else []
+        if po:
+            out = {"district": po[0].get("District", ""), "state": po[0].get("State", "")}
+    except Exception:
+        pass
+    _pin_cache[pin] = out
+    return out
+
+
+def _norm_state(s_):
+    low = (s_ or "").lower()
+    return next((x for x in STATES if x.lower() == low), None) or _STATE_ALIASES.get(low) or (s_ or "").title()
+
+
+def add_district(loc):
+    """Fills district / state from the PIN (India Post), falling back to the address text, then the city."""
+    official = pin_lookup(loc.get("pin"))
+    if official.get("district"):
+        loc["district"] = official["district"].title()
+    if official.get("state"):
+        loc["state"] = _norm_state(official["state"])
+    if not loc.get("district"):
+        loc["district"] = loc.get("city", "")
+    return loc
+
+
+def _cache_path():
+    d = os.path.join(os.path.expanduser("~"), ".rfs_generator")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "offer_locations.json")
+
+
+def load_location_cache():
+    try:
+        with open(_cache_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def save_location_cache(cache):
+    try:
+        with open(_cache_path(), "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=1)
+    except Exception:
+        pass
+
+
+def company_location(page_url, work_dir):
+    """Downloads the offer document behind a SEBI filing page and reads the registered office from the first pages."""
+    links = pdf_links(page_url)
+    if not links:
+        raise ValueError("no PDF on the filing page")
+    path = os.path.join(work_dir, "loc_%08x.pdf" % (abs(hash(page_url)) % 0xFFFFFFFF))
+    try:
+        download(links[0], path)
+        from pypdf import PdfReader
+        rd = PdfReader(path, strict=False)
+        text = "\n".join((rd.pages[i].extract_text() or "") for i in range(min(4, len(rd.pages))))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    loc = add_district(extract_location(text))
+    loc["pdf"] = links[0]
+    return loc
+
+
+def locate_all(items, work_dir, cache=None, workers=4, progress=None):
+    """Adds city / state to listing items (cached by filing URL). progress(done, total) is called as filings finish."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    cache = cache if cache is not None else load_location_cache()
+    todo = [it for it in items if it["url"] not in cache]
+    done = len(items) - len(todo)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(company_location, it["url"], work_dir): it for it in todo}
+        for f in as_completed(futs):
+            it = futs[f]
+            try:
+                cache[it["url"]] = f.result()
+            except Exception as e:
+                cache[it["url"]] = {"address": "", "city": "", "district": "", "state": "", "pin": "", "error": str(e)[:200]}
+            done += 1
+            if progress:
+                progress(done, len(items))
+    save_location_cache(cache)
+    for it in items:
+        it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address")})
+    return items
 
 
 # ------------------------------------------------------------------ DRHP / RHP format comparison
