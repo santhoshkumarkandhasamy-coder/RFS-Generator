@@ -277,9 +277,34 @@ with reg_tab:
         if per != "Latest" and not of["items"] and not of["errors"]:
             st.info(f"No DRHP / RHP filings found for {per}.")
         for e in of["errors"]:
-            st.warning(f"Could not read {e.split(':')[0]} - no internet access or the site refused the request. Open the source links below manually.")
+            src = e.split(":")[0]
+            if src.startswith("NSE") or src.startswith("BSE"):
+                st.warning(f"Could not read {src}. Exchanges often refuse automated access. Open the page (Source links below), "
+                           "use its Download (.csv / Excel) option, and add the file under *Add a list downloaded from NSE / BSE*.")
+            else:
+                st.warning(f"Could not read {src} - no internet access or the site refused the request. Open the source links below manually.")
             with st.expander("Technical detail"):
                 st.code(e)
+        with st.expander("Add a list downloaded from NSE / BSE", expanded=any(e.startswith(("NSE", "BSE")) for e in of["errors"])):
+            ex1, ex2 = st.columns([1, 3])
+            exch = ex1.selectbox("Exchange", ["NSE", "BSE", "BSE SME"], key="imp_exch")
+            imp = ex2.file_uploader("Downloaded list (CSV, Excel, saved web page, PDF)", type=["csv", "xlsx", "xls", "html", "htm", "pdf", "docx"], key="imp_list")
+            if imp is not None and ss.get("_imp_done") != imp.name + str(imp.size) + exch:
+                p = os.path.join(ss.workdir, "import_" + imp.name)
+                with open(p, "wb") as fh:
+                    fh.write(imp.getbuffer())
+                try:
+                    new = regulatory.import_listing(p, exch, ss.workdir)
+                    if of.get("period", "Latest") != "Latest":       # keep to the month being viewed
+                        new = [it for it in new if it["date"] and it["date"].strftime("%B %Y") == of["period"]]
+                    have = {(it["title"], it["url"], it.get("exchange")) for it in of["items"]}
+                    of["items"] = regulatory.merge_offers(of["items"] + [it for it in new if (it["title"], it["url"], exch) not in have])
+                    of["errors"] = [e for e in of["errors"] if not e.startswith(exch.split()[0])] if new else of["errors"]
+                    ss._imp_done = imp.name + str(imp.size) + exch
+                    st.success(f"{len(new)} {exch} filings added from {imp.name}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not read {imp.name}: {e}")
         if of["items"]:
             items = of["items"]
             cache = regulatory.load_location_cache()

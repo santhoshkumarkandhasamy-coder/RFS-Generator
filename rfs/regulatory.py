@@ -396,6 +396,11 @@ def all_offer_documents(sources=("SEBI", "NSE", "BSE"), month=None, urls=None, e
                     items.append(it)
         except Exception as e:
             errors.append(f"{name}: {e}")
+    return merge_offers(items), errors
+
+
+def merge_offers(items):
+    """Marks every source listing the same company ('seen_on') and sorts newest first."""
     groups = {}
     for it in items:
         it["company"] = company_name(it["title"])
@@ -403,7 +408,35 @@ def all_offer_documents(sources=("SEBI", "NSE", "BSE"), month=None, urls=None, e
     for it in items:
         it["seen_on"] = ", ".join(sorted(groups[_norm_company(it["company"])]))
     items.sort(key=lambda x: x["date"] or dt.date.min, reverse=True)
-    return items, errors
+    return items
+
+
+def import_listing(path, exchange, work_dir=None):
+    """Offer document list downloaded by the user from NSE / BSE (CSV, Excel, saved web page, PDF, Word).
+    Each row needs a company name and a date; a link column is used when present."""
+    ext = os.path.splitext(path)[1].lower()
+    rows = []
+    if ext in (".html", ".htm"):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            rows = _html_rows(fh.read(), {"NSE": "https://www.nseindia.com"}.get(exchange, "https://www.bseindia.com"))
+    else:
+        from .docreader import extract_tables
+        for t in extract_tables(path, work_dir):
+            head = [c.lower() for c in t[0]] if t else []
+            ncol = next((k for pat in ("company", "issuer", "name", "symbol") for k, h in enumerate(head) if pat in h), None)
+            for r in t[1:]:
+                d = next((_parse_date(c) for c in r if _parse_date(c)), None)
+                name = (r[ncol] if ncol is not None and ncol < len(r) else "") or next((c for c in r if re.search(r"limited|ltd", c, re.I)), "")
+                if not d or not name:
+                    continue
+                link = next((c for c in r if c.startswith("http")), "")
+                rows.append({"date": d, "title": name, "url": link, "text": " | ".join(r)})
+    out = []
+    for it in rows:
+        it["source"] = _doc_type(it.get("text", "") + " " + it["title"] + " " + it["url"])
+        it["exchange"] = exchange
+        out.append(it)
+    return out
 
 
 def pdf_links(page_url):
