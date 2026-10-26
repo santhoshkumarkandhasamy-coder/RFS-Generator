@@ -12,7 +12,7 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from rfs import tally, builder, mapping, exporters
+from rfs import tally, builder, mapping, exporters, docreader, regulatory
 
 st.set_page_config(page_title="RFS Generator", layout="wide")
 SLOTS = [("FY26", "Latest year"), ("FY25", "Previous year"), ("FY24", "Earliest year")]
@@ -23,6 +23,9 @@ ss.setdefault("tbfile", {})      # slot -> saved path
 ss.setdefault("workdir", tempfile.mkdtemp(prefix="rfs_"))
 ss.setdefault("overrides", {})
 ss.setdefault("project", {})
+ss.setdefault("docs", {})          # supporting documents: name -> {"path", "type", "text"}
+ss.setdefault("regcheck", {})      # results of the ICDR / DRHP check
+FILE_TYPES = docreader.SUPPORTED
 
 
 def fy_label(d):
@@ -45,9 +48,15 @@ with st.sidebar:
         ss.overrides = proj.get("overrides", {})
         ss._loaded = up.name
         st.success("Project loaded. Upload the trial balances again.")
-    st.markdown("**Steps**\n1. Company\n2. Trial balances\n3. Mapping\n4. Shareholders & ageing\n5. Adjustments\n6. Generate")
+    st.markdown("**Steps**\n1. ICDR & DRHP check\n2. Company\n3. Trial balances\n4. Supporting documents\n5. Mapping\n6. Shareholders & ageing\n7. Adjustments\n8. Generate")
+    with st.expander("Settings - source URLs"):
+        for k in list(regulatory.SOURCES):
+            regulatory.SOURCES[k] = st.text_input(k, regulatory.SOURCES[k], key="url_" + k)
 
-tabs = st.tabs(["1. Company", "2. Trial balances", "3. Mapping review", "4. Shareholders & ageing", "5. Adjustments", "6. Generate"])
+TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. Supporting documents", "5. Mapping review",
+                "6. Shareholders & ageing", "7. Adjustments", "8. Generate"])
+reg_tab, docs_tab = TABS[0], TABS[3]
+tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[6], TABS[7]]
 
 # ---------------------------------------------------------------- 1. company
 with tabs[0]:
@@ -92,27 +101,176 @@ YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24"}
 
 # ---------------------------------------------------------------- 2. trial balances
 with tabs[1]:
-    st.write("Upload the Tally trial balance exports (Excel, Detailed: opening, debit, credit, closing with Dr/Cr). "
-             "Ledgers must be in italics (default Tally export).")
+    st.write("Upload the trial balance for each year in any format: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), "
+             "PowerPoint (.pptx / .ppt) or PDF. A Tally Excel export (Detailed view) is read as-is. Other files need columns for "
+             "Particulars and Opening / Debit / Credit / Closing (Dr/Cr suffix or separate Dr and Cr columns); the group and "
+             "ledger structure is rebuilt from the totals.")
     cols = st.columns(3)
     for (slot, lbl), col in zip(SLOTS, cols):
         with col:
-            f = st.file_uploader(f"{lbl} - {fy_label(years[YKEY[slot]])}", type=["xlsx"], key="tb_" + slot)
+            f = st.file_uploader(f"{lbl} - {fy_label(years[YKEY[slot]])}", type=FILE_TYPES, key="tb_" + slot)
             if f is not None and ss.get("tbname_" + slot) != f.name + str(f.size):
-                path = os.path.join(ss.workdir, f"TB_{slot}.xlsx")
+                ext = os.path.splitext(f.name)[1].lower()
+                tdir = os.path.join(ss.workdir, "tb_" + slot)
+                os.makedirs(tdir, exist_ok=True)
+                path = os.path.join(tdir, f"TB_{slot}{ext}")
                 with open(path, "wb") as fh:
                     fh.write(f.getbuffer())
                 with st.spinner("Reading trial balance..."):
-                    ss.tb[slot] = tally.read_tb(path)
-                ss.tbfile[slot] = path
-                ss["tbname_" + slot] = f.name + str(f.size)
+                    try:
+                        ss.tb[slot], ss.tbfile[slot] = tally.read_any_tb(path, tdir)
+                        ss["tbname_" + slot] = f.name + str(f.size)
+                        ss["tbsrc_" + slot] = f.name
+                    except Exception as e:
+                        st.error(f"Could not read {f.name}: {e}")
             if slot in ss.tb:
                 op, drs, crs, cl = tally.tb_check(ss.tb[slot])
                 n = sum(1 for x in ss.tb[slot] if x["inc"])
                 ok = abs(op) < 1 and abs(cl) < 1 and abs(drs - crs) < 1
                 (st.success if ok else st.error)(f"{n} ledgers | Dr {drs:,.2f} | Cr {crs:,.2f} | closing net {cl:,.2f}")
+                if not ok:
+                    st.caption("The ledgers found do not reconcile to nil. Upload the Tally Excel export (Detailed) if available, "
+                               "or a file with a Group column; otherwise check the mapping tab for missing / repeated ledgers.")
+                if not ss.tbfile[slot].endswith(f"TB_{slot}.xlsx"):
+                    st.caption(f"Source: {ss.get('tbsrc_' + slot, '')} - normalised into a Tally-style TB sheet in the output.")
 
 ready = all(s in ss.tb for s, _ in SLOTS)
+
+# ---------------------------------------------------------------- ICDR & DRHP check
+with reg_tab:
+    st.write("Check the latest position before preparing the RFS: amendments under the SEBI (ICDR) Regulations, 2018 and the "
+             "latest DRHP / RHP filings to use as format references. Needs internet access.")
+    st.caption(f"RFS layout in this app last reviewed against ICDR / recent offer documents on {regulatory.FORMAT_REVIEWED_ON:%d %B %Y}.")
+    c1, c2 = st.columns(2)
+    if c1.button("Check latest ICDR updates", type="primary"):
+        with st.spinner("Reading SEBI regulations and circulars..."):
+            items, errs = regulatory.icdr_updates(regulatory.SOURCES)
+        ss.regcheck["icdr"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs}
+    if c2.button("Check latest DRHP / RHP filings"):
+        with st.spinner("Reading SEBI offer document listings..."):
+            items, errs = regulatory.offer_documents(regulatory.SOURCES)
+        ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs}
+
+    ic = ss.regcheck.get("icdr")
+    if ic:
+        st.subheader(f"ICDR amendments and circulars (checked {ic['checked']})")
+        for e in ic["errors"]:
+            st.warning(f"Could not read {e.split(':')[0]} - no internet access or the site refused the request. Open the source links below manually.")
+            with st.expander("Technical detail"):
+                st.code(e)
+        if ic["items"]:
+            df = pd.DataFrame([{"Date": i["date"], "Title": i["title"], "Source": i["source"], "Link": i["url"]} for i in ic["items"]])
+            st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
+            newer = [i for i in ic["items"] if i["date"] and i["date"] > regulatory.FORMAT_REVIEWED_ON]
+            if newer:
+                st.error(f"{len(newer)} ICDR-related update(s) are dated after the app's format review "
+                         f"({regulatory.FORMAT_REVIEWED_ON:%d-%m-%Y}). Read them and adjust the RFS before issue.")
+            else:
+                st.success("No ICDR-related update after the app's format review date.")
+    of = ss.regcheck.get("offer")
+    if of:
+        st.subheader(f"Latest DRHP / RHP filings (checked {of['checked']})")
+        for e in of["errors"]:
+            st.warning(f"Could not read {e.split(':')[0]} - no internet access or the site refused the request. Open the source links below manually.")
+            with st.expander("Technical detail"):
+                st.code(e)
+        if of["items"]:
+            df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "Link": i["url"]} for i in of["items"]])
+            st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
+            pick = st.selectbox("Use as format reference (downloads the offer document PDF and compares it)",
+                                ["-"] + [f"{i['date']} | {i['source']} | {i['title']}" for i in of["items"]])
+            if pick != "-" and st.button("Download and compare"):
+                it = of["items"][[f"{i['date']} | {i['source']} | {i['title']}" for i in of["items"]].index(pick)]
+                try:
+                    with st.spinner("Finding the PDF on the filing page..."):
+                        links = regulatory.pdf_links(it["url"])
+                    if not links:
+                        st.warning("No PDF link found on the filing page - download the PDF from the link and upload it below.")
+                    else:
+                        p = os.path.join(ss.workdir, "reference_offer_document.pdf")
+                        with st.spinner("Downloading (offer documents are large)..."):
+                            regulatory.download(links[0], p)
+                        ss.regcheck["reference"] = {"name": it["title"], "type": it["source"], "url": links[0], "date": str(it["date"]),
+                                                    "analysis": regulatory.analyse_offer_document(p)}
+                except Exception as e:
+                    st.warning(f"Download failed ({e}). Download the PDF from the link and upload it below.")
+
+    with st.expander("Source links (open manually if the automatic check cannot reach them)"):
+        for k, v in {**regulatory.SOURCES, **regulatory.MANUAL_LINKS}.items():
+            st.markdown(f"- [{k}]({v})")
+
+    st.subheader("Compare with a DRHP / RHP")
+    ref = st.file_uploader("Upload a DRHP / RHP (PDF, or Word)", type=["pdf", "docx", "doc"], key="refdoc")
+    if ref is not None and ss.get("_refname") != ref.name:
+        p = os.path.join(ss.workdir, "reference_" + ref.name)
+        with open(p, "wb") as fh:
+            fh.write(ref.getbuffer())
+        with st.spinner("Reading the restated financial information section..."):
+            pdf = p
+            if not p.lower().endswith(".pdf"):
+                pdf = exporters.docx_to_pdf(docreader.to_modern(p, ss.workdir), ss.workdir)
+            ss.regcheck["reference"] = {"name": ref.name, "type": "Uploaded", "url": "", "date": dt.date.today().isoformat(),
+                                        "analysis": regulatory.analyse_offer_document(pdf)}
+        ss._refname = ref.name
+    rf = ss.regcheck.get("reference")
+    if rf:
+        a = rf["analysis"]
+        st.write(f"**Reference:** {rf['name']} ({rf['type']})" + (f" - restated section found on pages {a['pages'][0]}-{a['pages'][1]} of {a['total_pages']}" if a["pages"] else " - restated section not found"))
+        st.dataframe(pd.DataFrame(a["coverage"]), hide_index=True, width="stretch")
+        if a["not_in_app"]:
+            with st.expander(f"Headings in the reference not matched to this app's annexures ({len(a['not_in_app'])}) - consider adding"):
+                for h in a["not_in_app"]:
+                    st.write("- " + h)
+        with st.expander("All headings found in the reference restated section"):
+            for h in a["headings"]:
+                st.write("- " + h)
+
+    st.subheader("ICDR checklist followed by the RFS layout")
+    st.dataframe(pd.DataFrame(regulatory.CHECKLIST, columns=["Requirement", "Source"]), hide_index=True, width="stretch")
+
+# ---------------------------------------------------------------- supporting documents
+with docs_tab:
+    st.write("Upload the supporting documents in any format (Excel, Word, PowerPoint, PDF, .doc / .xls / .ppt): audited financial "
+             "statements, sanction letters, actuarial reports, ageing, tax computations, related party details, etc. "
+             "Text is extracted so you can search them while completing the inputs; the list is recorded in the output workbook.")
+    ups = st.file_uploader("Supporting documents", type=FILE_TYPES, accept_multiple_files=True, key="docs_upload")
+    for f in ups or []:
+        if f.name in ss.docs:
+            continue
+        ddir = os.path.join(ss.workdir, "docs"); os.makedirs(ddir, exist_ok=True)
+        p = os.path.join(ddir, f.name)
+        with open(p, "wb") as fh:
+            fh.write(f.getbuffer())
+        try:
+            with st.spinner(f"Reading {f.name}..."):
+                txt = docreader.extract_text(p, ddir)
+        except Exception as e:
+            txt = ""
+            st.warning(f"{f.name}: text could not be extracted ({e}). It is still listed.")
+        ss.docs[f.name] = {"path": p, "type": os.path.splitext(f.name)[1].lstrip(".").upper(), "text": txt,
+                           "category": "", "added": dt.date.today().isoformat()}
+    if ss.docs:
+        cats = ["", "Audited financial statements", "Trial balance", "Sanction letter / loan statement", "Actuarial report",
+                "Ageing", "Tax computation / ITR / 3CD", "Related party", "Fixed asset register", "Contingent liabilities",
+                "Company records (MOA / AOA / ROC)", "Other"]
+        df = pd.DataFrame([{"Document": k, "Type": v["type"], "Category": v.get("category", ""),
+                            "Characters read": len(v["text"])} for k, v in ss.docs.items()])
+        ed = st.data_editor(df, hide_index=True, width="stretch", key="docsed", disabled=["Document", "Type", "Characters read"],
+                            column_config={"Category": st.column_config.SelectboxColumn(options=cats)})
+        for _, rw in ed.iterrows():
+            ss.docs[rw["Document"]]["category"] = rw["Category"] or ""
+        q = st.text_input("Search in documents (e.g. closing stock, gratuity, sanction, contingent)")
+        if q:
+            hits = []
+            for k, v in ss.docs.items():
+                for line in v["text"].splitlines():
+                    if q.lower() in line.lower():
+                        hits.append({"Document": k, "Line": line.strip()[:300]})
+            st.write(f"{len(hits)} line(s) found")
+            st.dataframe(pd.DataFrame(hits[:500]), hide_index=True, width="stretch")
+        pick = st.selectbox("Preview document text", ["-"] + list(ss.docs))
+        if pick != "-":
+            st.text_area("Extracted text", ss.docs[pick]["text"][:200000], height=300)
 
 # ---------------------------------------------------------------- 3. mapping
 with tabs[2]:
@@ -233,7 +391,9 @@ with tabs[4]:
 
 # ---------------------------------------------------------------- 6. generate
 with tabs[5]:
-    st.download_button("Save project (.json) for later", json.dumps({"project": ss.project, "overrides": ss.overrides}, indent=1, default=str),
+    st.download_button("Save project (.json) for later", json.dumps({"project": ss.project, "overrides": ss.overrides, "regcheck": ss.regcheck,
+                                   "documents": {k: {kk: vv for kk, vv in v.items() if kk not in ("text", "path")} for k, v in ss.docs.items()}},
+                                  indent=1, default=str),
                        f"{(name or 'rfs').replace(' ', '_')}_project.json")
     problems = []
     if not ready: problems.append("Upload all three trial balances.")
@@ -262,6 +422,8 @@ with tabs[5]:
         out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{fy_label(years['d26'])[3:]}.xlsx")
         with st.spinner("Building workbook..."):
             builder.build(cfg, ss.tb, ss.tbfile, out, ss.overrides)
+            exporters.add_reference_sheet(out, ss.regcheck, ss.docs,
+                                          {fy_label(years[YKEY[s_]]): ss.get("tbsrc_" + s_, os.path.basename(ss.tbfile.get(s_, ""))) for s_, _ in SLOTS})
         with st.spinner("Preparing output files..."):
             try:
                 ss.outputs = exporters.export_all(out, [FORMATS[c] for c in chosen], os.path.join(run_dir, "out"), name)

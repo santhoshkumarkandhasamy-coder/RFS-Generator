@@ -21,12 +21,18 @@ Open http://localhost:8501. On Windows you can simply double-click `run_app.bat`
 
 ## Using the app
 
-1. **Company** - name, CIN, address, background, latest year end, authorised capital, face value, tax rate, closing stock (not carried in Tally), auditor, directors.
-2. **Trial balances** - upload the latest, previous and earliest year Tally TB exports (Detailed view with opening / debit / credit / closing and Dr/Cr; ledgers in italics). The app checks Dr = Cr and that closing balances net to nil.
-3. **Mapping review** - every ledger gets a suggested note line ("Masters") from Tally group names and keywords, separately for debit and credit balances. Correct anything, press *Save mapping*, and download the mapping JSON to reuse next time.
-4. **Shareholders & ageing** - register of members (promoter flag) and receivables / payables ageing.
-5. **Adjustments** - restatement journal entries in lakhs (entry no., date, master, Dr, Cr, narration).
-6. **Generate** - choose output formats and download:
+1. **ICDR & DRHP check** - at the time of preparing the RFS:
+   - *Check latest ICDR updates* reads the SEBI regulations / circulars listings and shows ICDR-related amendments newest first; anything dated after the date the layout was last reviewed is flagged in red.
+   - *Check latest DRHP / RHP filings* lists recent offer documents filed with SEBI / RoC; pick one and *Download and compare*, or upload a DRHP / RHP (PDF, Word). The app finds the restated financial information section and shows which annexures it contains vs what the app produces, plus headings the app does not produce.
+   - Needs internet access. If SEBI cannot be reached the app says so and shows the source links to open manually; listing URLs can be edited in the sidebar (*Settings - source URLs*).
+   - The checks and the reference document are recorded in a "Reference & Documents" sheet in the output.
+2. **Company** - name, CIN, address, background, latest year end, authorised capital, face value, tax rate, closing stock (not carried in Tally), auditor, directors.
+3. **Trial balances** - upload the latest, previous and earliest year TB in **any format**: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), PowerPoint (.pptx / .ppt), PDF or OpenDocument. A Tally Excel export is used as-is; other formats are read as a table (Particulars / Opening / Debit / Credit / Closing, Dr/Cr) and rebuilt into a Tally-style sheet. The app checks Dr = Cr and that closing balances net to nil (shown in red if not).
+4. **Supporting documents** - upload any number of documents (sanction letters, actuarial reports, ageing, registers, audited financials...) in the same formats. Text is extracted, can be categorised and searched, and the list goes into the output.
+5. **Mapping review** - every ledger gets a suggested note line ("Masters") from Tally group names and keywords, separately for debit and credit balances. Correct anything, press *Save mapping*, and download the mapping JSON to reuse next time.
+6. **Shareholders & ageing** - register of members (promoter flag) and receivables / payables ageing.
+7. **Adjustments** - restatement journal entries in lakhs (entry no., date, master, Dr, Cr, narration).
+8. **Generate** - choose output formats and download:
    - **Excel (.xlsx)** - the formula-linked RFS workbook
    - **Word (.docx / .doc)** - all annexures and notes as a document
    - **PowerPoint (.pptx)** - summary deck (statements, adjustments, ratios, capitalisation)
@@ -41,7 +47,9 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 | Path | Purpose |
 |---|---|
 | `app.py` | Streamlit UI |
-| `rfs/tally.py` | Reads Tally TB exports: Dr/Cr signs, group/ledger tree, repeated ledgers |
+| `rfs/tally.py` | Reads Tally TB exports (Dr/Cr signs, group/ledger tree, repeated ledgers) and TBs in other formats |
+| `rfs/docreader.py` | Text and tables from Excel, CSV, Word, PowerPoint, PDF (legacy formats via LibreOffice / MS Office) |
+| `rfs/regulatory.py` | Latest ICDR updates and DRHP / RHP filings from SEBI; DRHP restated-section comparison |
 | `rfs/classify.py` | Rules: Tally group / ledger name -> Schedule III classification |
 | `rfs/mapping.py` | Masters (note lines), suggestions, overrides |
 | `rfs/builder.py` | Writes the workbook |
@@ -49,6 +57,8 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 | `tests/smoke_test.py` | Builds a workbook from three TBs with a minimal config |
 
 ## Notes / limits
+- `.doc`, `.xls`, `.ppt` and OpenDocument inputs need LibreOffice (or Microsoft Office on Windows). Google Docs / Sheets: download as .docx / .xlsx first. Scanned (image-only) PDFs are not read - use a text PDF or the Excel export.
+- A TB that is not a Tally Excel export should keep groups and ledgers distinguishable (indentation, bold / italics or group totals); a flat list where Tally repeats ledgers may not reconcile - the app shows this in red.
 - Three financial years; a stub period is not yet supported.
 - PPE is presented on net (WDV) movement from the TB; gross block needs the fixed asset register.
 - Review the yellow cells (inputs) and grey check cells in the output before issue.

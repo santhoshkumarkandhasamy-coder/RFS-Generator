@@ -65,6 +65,67 @@ def recalculate(xlsx_path, out_dir):
     raise RuntimeError("Install LibreOffice (or use Windows with Microsoft Excel and pywin32) to export Word / PowerPoint / HTML.")
 
 
+def docx_to_pdf(docx_path, out_dir):
+    so = _soffice()
+    if so:
+        subprocess.run([so, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path], check=True, timeout=600, capture_output=True)
+        return os.path.join(out_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+    if sys.platform.startswith("win"):
+        import win32com.client
+        wd = win32com.client.DispatchEx("Word.Application")
+        try:
+            d = wd.Documents.Open(os.path.abspath(docx_path))
+            out = os.path.abspath(os.path.join(out_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf"))
+            d.SaveAs(out, 17); d.Close(False)
+        finally:
+            wd.Quit()
+        return out
+    raise RuntimeError("Reading a Word offer document needs LibreOffice or Microsoft Word - upload the PDF instead.")
+
+
+def add_reference_sheet(xlsx_path, regcheck, docs, tb_sources):
+    """Adds 'Reference & Documents': ICDR check, DRHP / RHP used as format reference, documents considered."""
+    from openpyxl.styles import Font
+    wb = openpyxl.load_workbook(xlsx_path)
+    ws = wb.create_sheet("Reference & Documents")
+    b, n, i = Font(name="Times New Roman", size=10, bold=True), Font(name="Times New Roman", size=10), Font(name="Times New Roman", size=9, italic=True)
+    ws.column_dimensions["A"].width = 14; ws.column_dimensions["B"].width = 90; ws.column_dimensions["C"].width = 22; ws.column_dimensions["D"].width = 50
+    r = 1
+    def put(row, vals, font=n):
+        for j, v in enumerate(vals):
+            c = ws.cell(row, 1 + j, v); c.font = font
+    put(r, ["Regulatory reference and documents considered in preparing the Restated Financial Statements"], b); r += 2
+    put(r, ["1. SEBI (ICDR) Regulations - latest updates checked"], b); r += 1
+    ic = (regcheck or {}).get("icdr")
+    if ic:
+        put(r, [f"Checked on {ic['checked']}"], i); r += 1
+        put(r, ["Date", "Title", "Source", "Link"], b); r += 1
+        for it in ic["items"]:
+            put(r, [str(it["date"] or ""), it["title"], it.get("source", ""), it["url"]]); r += 1
+    else:
+        put(r, ["", "Not checked in the app - confirm the latest ICDR amendments before issue."], i); r += 1
+    r += 1
+    put(r, ["2. Offer document used as format reference"], b); r += 1
+    rf = (regcheck or {}).get("reference")
+    if rf:
+        put(r, ["", f"{rf['name']} ({rf['type']}, {rf.get('date', '')})", "", rf.get("url", "")]); r += 1
+        for c in rf["analysis"]["coverage"]:
+            put(r, ["", c["Item produced by RFS Generator"], c["Seen in DRHP / RHP"]]); r += 1
+    else:
+        put(r, ["", "No DRHP / RHP compared in the app."], i); r += 1
+    r += 1
+    put(r, ["3. Trial balances"], b); r += 1
+    for k, v in (tb_sources or {}).items():
+        put(r, [k, v]); r += 1
+    r += 1
+    put(r, ["4. Supporting documents"], b); r += 1
+    put(r, ["Type", "Document", "Category", "Added"], b); r += 1
+    for k, v in (docs or {}).items():
+        put(r, [v.get("type", ""), k, v.get("category", ""), v.get("added", "")]); r += 1
+    wb.save(xlsx_path)
+    return xlsx_path
+
+
 def docx_to_doc(docx_path, out_dir):
     so = _soffice()
     if so:
