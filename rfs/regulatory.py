@@ -125,14 +125,19 @@ def parse_listing(html_text, base="https://www.sebi.gov.in"):
         if not a:
             continue
         d = _parse_date(tr.get_text(" ", strip=True))
-        title = (a.get("title") or a.get_text(" ", strip=True)).strip()
+        raw = (a.get("title") or a.get_text(" ", strip=True)).strip()
+        pdf = re.search(r"href\s*=\s*['\"]([^'\"]+?\.pdf)", raw, re.I)   # SEBI puts the PDF link inside the title
+        title = re.sub(r"\s+", " ", BeautifulSoup(raw.split("<")[0], "html.parser").get_text(" ")).strip(" -")
         href = a["href"]
         if href.startswith("/"):
             href = base + href
         if not title or href in seen:
             continue
         seen.add(href)
-        items.append({"date": d, "title": title, "url": href})
+        it = {"date": d, "title": title, "url": href}
+        if pdf:
+            it["pdf"] = pdf.group(1) if pdf.group(1).startswith("http") else base + pdf.group(1)
+        items.append(it)
     if not items:   # fall back to any link that looks like a SEBI legal / filing page
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -444,25 +449,31 @@ def pdf_links(page_url):
     if re.search(r"\.pdf($|\?)", page_url, re.I):
         return [page_url]
     from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
     soup = BeautifulSoup(_get(page_url), "html.parser")
     out = []
-    for tag in soup.find_all(["a", "iframe", "embed"]):
-        src = tag.get("href") or tag.get("src") or ""
-        m = re.search(r"(https?://[^\"'\s]+\.pdf)", src) or re.search(r"file=(https?://[^\"'&\s]+\.pdf)", src)
+    for tag in soup.find_all(["a", "iframe", "embed", "object"]):
+        src = tag.get("href") or tag.get("src") or tag.get("data") or ""
+        m = re.search(r"(https?://[^\"'\s]+\.pdf)", src, re.I) or re.search(r"file=(https?://[^\"'&\s]+\.pdf)", src, re.I)
         if m:
             out.append(m.group(1))
-        elif src.lower().endswith(".pdf"):
-            out.append(src if src.startswith("http") else "https://www.sebi.gov.in" + src)
+        elif re.search(r"\.pdf($|\?)", src, re.I):
+            out.append(urljoin(page_url, src))          # relative link - resolve against the page it is on
     return list(dict.fromkeys(out))
 
 
 def download(url, path):
     import requests
-    with requests.get(url, timeout=120, stream=True, headers={"User-Agent": "Mozilla/5.0 (RFS Generator)"}) as r:
+    site = re.match(r"https?://[^/]+", url).group(0)
+    hdr = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": site + "/", "Accept": "application/pdf,*/*"}
+    with requests.get(url, timeout=180, stream=True, headers=hdr) as r:
         r.raise_for_status()
         with open(path, "wb") as fh:
             for chunk in r.iter_content(1 << 16):
                 fh.write(chunk)
+    with open(path, "rb") as fh:
+        if fh.read(5) != b"%PDF-":
+            raise ValueError(f"the site returned a web page instead of the PDF (it may require opening the link in a browser): {url}")
     return path
 
 
@@ -590,11 +601,11 @@ def save_location_cache(cache):
         pass
 
 
-def company_location(page_url, work_dir):
-    """Downloads the offer document behind a SEBI filing page and reads the registered office from the first pages."""
-    links = pdf_links(page_url)
+def company_location(page_url, work_dir, pdf=None):
+    """Downloads the offer document (direct PDF link, or the PDF on a filing page) and reads the registered office from the first pages."""
+    links = [pdf] if pdf else pdf_links(page_url)
     if not links:
-        raise ValueError("no PDF on the filing page")
+        raise ValueError("no PDF link found on the filing page")
     path = os.path.join(work_dir, "loc_%08x.pdf" % (abs(hash(page_url)) % 0xFFFFFFFF))
     try:
         download(links[0], path)
@@ -606,8 +617,12 @@ def company_location(page_url, work_dir):
             os.remove(path)
         except OSError:
             pass
+    if len(text.strip()) < 50:
+        raise ValueError("the cover page has no readable text (scanned PDF)")
     loc = add_district(extract_location(text))
     loc["pdf"] = links[0]
+    if not loc["state"]:
+        loc["error"] = "registered office address not found on the first pages"
     return loc
 
 
@@ -615,10 +630,10 @@ def locate_all(items, work_dir, cache=None, workers=4, progress=None):
     """Adds city / state to listing items (cached by filing URL). progress(done, total) is called as filings finish."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     cache = cache if cache is not None else load_location_cache()
-    todo = [it for it in items if it["url"] not in cache]
+    todo = [it for it in items if it["url"] not in cache or cache[it["url"]].get("error")]   # failed ones are tried again
     done = len(items) - len(todo)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(company_location, it["url"], work_dir): it for it in todo}
+        futs = {ex.submit(company_location, it["url"], work_dir, it.get("pdf")): it for it in todo}
         for f in as_completed(futs):
             it = futs[f]
             try:
@@ -630,7 +645,7 @@ def locate_all(items, work_dir, cache=None, workers=4, progress=None):
                 progress(done, len(items))
     save_location_cache(cache)
     for it in items:
-        it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address")})
+        it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address", "error")})
     return items
 
 

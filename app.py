@@ -310,8 +310,8 @@ with reg_tab:
             cache = regulatory.load_location_cache()
             for it in items:                         # locations already found earlier (cached on this PC)
                 if it["url"] in cache:
-                    it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address")})
-            missing = [it for it in items if it["url"] not in cache]
+                    it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address", "error")})
+            missing = [it for it in items if it["url"] not in cache or cache[it["url"]].get("error")]
             lc1, lc2 = st.columns([3, 2])
             lc1.caption("SEBI lists only the company name. To filter by state, the app reads the registered office "
                         "on the cover page of each offer document (downloads each PDF once; results are remembered on this PC).")
@@ -333,6 +333,13 @@ with reg_tab:
             df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "Source": i.get("exchange", "SEBI"),
                                 "Filed / listed on": i.get("seen_on", ""), "State": i.get("state", ""), "Link": i["url"]} for i in shown])
             st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
+            failed = [it for it in items if it.get("error")]
+            if failed:
+                with st.expander(f"State not found for {len(failed)} filing(s) - why"):
+                    st.dataframe(pd.DataFrame([{"Company": it["title"], "Source": it.get("exchange", "SEBI"), "Reason": it["error"],
+                                                "Link": it.get("pdf") or it["url"]} for it in failed]),
+                                 hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
+                    st.caption("Press Find company locations again to retry. Scanned PDFs and sites that refuse downloads cannot be read.")
             located = [it for it in items if it.get("state")]
             if located:
                 with st.expander("State-wise summary", expanded=True):
