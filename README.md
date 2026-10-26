@@ -21,6 +21,8 @@ Open http://localhost:8501. On Windows you can simply double-click `run_app.bat`
 
 ## Using the app
 
+Quickest way: drop all your files into **Upload input files (any format)** in the sidebar. Trial balances go to the right year (from the year in the file name or heading, e.g. `TB FY 2025-26.pdf`), other files go to Supporting documents, and a saved project `.json` re-opens the project. Or use the tabs:
+
 1. **ICDR & DRHP check** - at the time of preparing the RFS:
    - *Check latest ICDR updates* reads the SEBI regulations / circulars listings and shows ICDR-related amendments newest first; anything dated after the date the layout was last reviewed is flagged in red.
    - *Check latest DRHP / RHP filings* lists recent offer documents filed with SEBI / RoC; pick one and *Download and compare*, or upload a DRHP / RHP (PDF, Word). The app finds the restated financial information section and shows which annexures it contains vs what the app produces, plus headings the app does not produce.
@@ -50,7 +52,7 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 | `rfs/tally.py` | Reads Tally TB exports (Dr/Cr signs, group/ledger tree, repeated ledgers) and TBs in other formats |
 | `rfs/docreader.py` | Text and tables from Excel, CSV, Word, PowerPoint, PDF (legacy formats via LibreOffice / MS Office) |
 | `rfs/regulatory.py` | Latest ICDR updates and DRHP / RHP filings from SEBI; DRHP restated-section comparison |
-| `rfs/classify.py` | Rules: Tally group / ledger name -> Schedule III classification |
+| `rfs/classify.py` | Generic rules: Tally standard groups and ledger-name keywords -> Schedule III note line (works for any company; review in the app) |
 | `rfs/mapping.py` | Masters (note lines), suggestions, overrides |
 | `rfs/builder.py` | Writes the workbook |
 | `rfs/exporters.py` | Recalculates and exports to Word, PowerPoint and HTML |
@@ -59,6 +61,7 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 ## Notes / limits
 - `.doc`, `.xls`, `.ppt` and OpenDocument inputs need LibreOffice (or Microsoft Office on Windows). Google Docs / Sheets: download as .docx / .xlsx first. Scanned (image-only) PDFs are not read - use a text PDF or the Excel export.
 - A TB that is not a Tally Excel export should keep groups and ledgers distinguishable (indentation, bold / italics or group totals); a flat list where Tally repeats ledgers may not reconcile - the app shows this in red.
+- The layout has no separate notes for investments or unsecured loans from non-directors: investments map to other current assets (fixed deposits to bank balances) and unsecured loans are shown lender-wise under loans from directors - change in the mapping review if needed.
 - Three financial years; a stub period is not yet supported.
 - PPE is presented on net (WDV) movement from the TB; gross block needs the fixed asset register.
 - Review the yellow cells (inputs) and grey check cells in the output before issue.

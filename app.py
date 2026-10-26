@@ -7,6 +7,7 @@ Run:  streamlit run app.py
 import datetime as dt
 import json
 import os
+import re
 import tempfile
 
 import pandas as pd
@@ -40,14 +41,18 @@ def P(key, default=None):
 with st.sidebar:
     st.header("RFS Generator")
     st.caption("SEBI ICDR - Indian GAAP - Schedule III Division I")
-    up = st.file_uploader("Reload a saved project (optional, .json)", type="json", key="projup",
-                          help="Only for re-opening a project saved from the Generate tab. Trial balances are uploaded in tab 2.")
-    if up is not None and ss.get("_loaded") != up.name:
-        proj = json.load(up)
-        ss.project = proj.get("project", {})
-        ss.overrides = proj.get("overrides", {})
-        ss._loaded = up.name
-        st.success("Project loaded. Upload the trial balances again.")
+    quick = st.file_uploader("Upload input files (any format)", type=FILE_TYPES + ["json"], accept_multiple_files=True, key="quickup",
+                             help="Excel, CSV, Word, PowerPoint, PDF, .doc / .xls / .ppt, or a saved project (.json). Trial balances are "
+                                  "placed in the year found in the file name or heading (e.g. FY 2025-26, 25-26); other files go to "
+                                  "Supporting documents. You can also upload in tabs 3 and 4.")
+    quick_msg = st.container()
+    for up in quick or []:
+        if up.name.lower().endswith(".json") and ss.get("_loaded") != up.name + str(up.size):
+            proj = json.load(up)
+            ss.project = proj.get("project", {})
+            ss.overrides = proj.get("overrides", {})
+            ss._loaded = up.name + str(up.size)
+            quick_msg.success(f"Project {up.name} loaded. Upload the trial balances again.")
     st.markdown("**Steps**\n1. ICDR & DRHP check\n2. Company\n3. Trial balances\n4. Supporting documents\n5. Mapping\n6. Shareholders & ageing\n7. Adjustments\n8. Generate")
     with st.expander("Settings - source URLs"):
         for k in list(regulatory.SOURCES):
@@ -99,6 +104,99 @@ with tabs[0]:
 years = {"d26": latest, "d25": latest.replace(year=latest.year - 1), "d24": latest.replace(year=latest.year - 2)}
 YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24"}
 
+
+def load_tb(slot, f):
+    """Save an uploaded trial balance for a year slot and read it (raises if it cannot be read)."""
+    ext = os.path.splitext(f.name)[1].lower()
+    tdir = os.path.join(ss.workdir, "tb_" + slot)
+    os.makedirs(tdir, exist_ok=True)
+    path = os.path.join(tdir, f"TB_{slot}{ext}")
+    with open(path, "wb") as fh:
+        fh.write(f.getbuffer())
+    ss.tb[slot], ss.tbfile[slot] = tally.read_any_tb(path, tdir)
+    ss["tbname_" + slot] = f.name + str(f.size)
+    ss["tbsrc_" + slot] = f.name
+
+
+def add_doc(f):
+    """Save an uploaded supporting document and extract its text."""
+    ddir = os.path.join(ss.workdir, "docs"); os.makedirs(ddir, exist_ok=True)
+    p = os.path.join(ddir, f.name)
+    with open(p, "wb") as fh:
+        fh.write(f.getbuffer())
+    try:
+        txt = docreader.extract_text(p, ddir)
+        err = None
+    except Exception as e:
+        txt, err = "", str(e)
+    ss.docs[f.name] = {"path": p, "type": os.path.splitext(f.name)[1].lstrip(".").upper(), "text": txt,
+                       "category": "", "added": dt.date.today().isoformat()}
+    return err
+
+
+def year_slot(text):
+    """Year slot whose financial year appears in a file name / heading (FY 2025-26, 25-26, 2025-2026, FY26, 31-Mar-2026)."""
+    t = re.sub(r"[_\s./]+", "-", text.lower())
+    for slot, _ in SLOTS:
+        y = years[YKEY[slot]].year
+        pats = [f"{y - 1}-{str(y)[2:]}", f"{str(y - 1)[2:]}-{str(y)[2:]}", f"{y - 1}-{y}", f"fy-?{str(y)[2:]}(?!\\d)", f"mar[a-z]*-?{y}"]
+        if any(re.search(r"(?<!\d)" + p_, t) for p_ in pats):
+            return slot
+    return None
+
+
+def heading_text(f):
+    """First lines of a spreadsheet / CSV (Tally puts the period in the heading)."""
+    ext = os.path.splitext(f.name)[1].lower()
+    try:
+        if ext in (".xlsx", ".xlsm"):
+            import openpyxl
+            ws = openpyxl.load_workbook(f, read_only=True, data_only=True).worksheets[0]
+            return " ".join(str(v) for r in ws.iter_rows(max_row=10, values_only=True) for v in r if v is not None)
+        if ext == ".csv":
+            return f.getvalue()[:2000].decode("utf-8", "ignore")
+    except Exception:
+        pass
+    finally:
+        f.seek(0)
+    return ""
+
+
+# ---------------------------------------------------------------- sidebar upload: route files to TB slots / documents
+for up in quick or []:
+    key = up.name + str(up.size)
+    if up.name.lower().endswith(".json") or key in ss.setdefault("_quick_done", set()):
+        continue
+    ss._quick_done.add(key)
+    slot = year_slot(up.name) or year_slot(heading_text(up))
+    named_tb = bool(re.search(r"trial|\btb\b|tb[-_ ]", up.name, re.I))
+    if (slot or named_tb) and up.name.lower().rsplit(".", 1)[-1] in FILE_TYPES:
+        slot = slot or next((s_ for s_, _ in SLOTS if s_ not in ss.tb), None)
+        if slot:
+            before = {k: ss.get(k) for k in ("tbname_" + slot, "tbsrc_" + slot)}, ss.tb.get(slot), ss.tbfile.get(slot)
+            with st.spinner(f"Reading {up.name} as trial balance..."):
+                try:
+                    load_tb(slot, up)
+                    op, drs, crs, cl = tally.tb_check(ss.tb[slot])
+                    ok = abs(op) < 1 and abs(cl) < 1 and abs(drs - crs) < 1 and sum(1 for x in ss.tb[slot] if x["inc"]) >= 10
+                    if named_tb or ok:
+                        quick_msg.success(f"{up.name} -> trial balance {fy_label(years[YKEY[slot]])}")
+                        continue
+                    raise ValueError("not a trial balance")
+                except Exception as e:
+                    keys, tb_, tf_ = before          # put back whatever was in the slot
+                    for k, v in keys.items():
+                        ss[k] = v
+                    if tb_ is None:
+                        ss.tb.pop(slot, None); ss.tbfile.pop(slot, None)
+                    else:
+                        ss.tb[slot], ss.tbfile[slot] = tb_, tf_
+                    if named_tb:
+                        quick_msg.warning(f"{up.name} could not be read as a trial balance ({e}); added to supporting documents.")
+    with st.spinner(f"Reading {up.name}..."):
+        err = add_doc(up)
+    quick_msg.info(f"{up.name} -> supporting documents" + (f" (text not extracted: {err})" if err else ""))
+
 # ---------------------------------------------------------------- 2. trial balances
 with tabs[1]:
     st.write("Upload the trial balance for each year in any format: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), "
@@ -110,17 +208,9 @@ with tabs[1]:
         with col:
             f = st.file_uploader(f"{lbl} - {fy_label(years[YKEY[slot]])}", type=FILE_TYPES, key="tb_" + slot)
             if f is not None and ss.get("tbname_" + slot) != f.name + str(f.size):
-                ext = os.path.splitext(f.name)[1].lower()
-                tdir = os.path.join(ss.workdir, "tb_" + slot)
-                os.makedirs(tdir, exist_ok=True)
-                path = os.path.join(tdir, f"TB_{slot}{ext}")
-                with open(path, "wb") as fh:
-                    fh.write(f.getbuffer())
                 with st.spinner("Reading trial balance..."):
                     try:
-                        ss.tb[slot], ss.tbfile[slot] = tally.read_any_tb(path, tdir)
-                        ss["tbname_" + slot] = f.name + str(f.size)
-                        ss["tbsrc_" + slot] = f.name
+                        load_tb(slot, f)
                     except Exception as e:
                         st.error(f"Could not read {f.name}: {e}")
             if slot in ss.tb:
@@ -237,18 +327,10 @@ with docs_tab:
     for f in ups or []:
         if f.name in ss.docs:
             continue
-        ddir = os.path.join(ss.workdir, "docs"); os.makedirs(ddir, exist_ok=True)
-        p = os.path.join(ddir, f.name)
-        with open(p, "wb") as fh:
-            fh.write(f.getbuffer())
-        try:
-            with st.spinner(f"Reading {f.name}..."):
-                txt = docreader.extract_text(p, ddir)
-        except Exception as e:
-            txt = ""
-            st.warning(f"{f.name}: text could not be extracted ({e}). It is still listed.")
-        ss.docs[f.name] = {"path": p, "type": os.path.splitext(f.name)[1].lstrip(".").upper(), "text": txt,
-                           "category": "", "added": dt.date.today().isoformat()}
+        with st.spinner(f"Reading {f.name}..."):
+            err = add_doc(f)
+        if err:
+            st.warning(f"{f.name}: text could not be extracted ({err}). It is still listed.")
     if ss.docs:
         cats = ["", "Audited financial statements", "Trial balance", "Sanction letter / loan statement", "Actuarial report",
                 "Ageing", "Tax computation / ITR / 3CD", "Related party", "Fixed asset register", "Contingent liabilities",
