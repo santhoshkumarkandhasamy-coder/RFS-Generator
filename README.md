@@ -17,7 +17,7 @@ with `Adj Entry RFS` journal entries for restatement adjustments and source shee
 pip install -r requirements.txt
 streamlit run app.py
 ```
-Open http://localhost:8501. Optional: install LibreOffice so the app can recalculate and preview key figures; otherwise Excel recalculates on open.
+Open http://localhost:8501. On Windows you can simply double-click `run_app.bat` (needs Python 3.11+ added to PATH). Optional: install LibreOffice so the app can recalculate and preview key figures; otherwise Excel recalculates on open.
 
 ## Using the app
 
