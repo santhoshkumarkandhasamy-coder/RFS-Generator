@@ -239,7 +239,16 @@ with reg_tab:
     if c2.button("Check latest DRHP / RHP filings"):
         with st.spinner("Reading SEBI offer document listings..."):
             items, errs = regulatory.offer_documents(regulatory.SOURCES)
-        ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs}
+        ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs, "period": "Latest"}
+    today = dt.date.today()
+    months = [dt.date(today.year + (today.month - 1 - k) // 12, (today.month - 1 - k) % 12 + 1, 1) for k in range(24)]   # last 24 months
+    m1, m2 = c2.columns([3, 2])
+    mon = m1.selectbox("Month", months, format_func=lambda d: d.strftime("%B %Y"), key="offer_month", label_visibility="collapsed")
+    if m2.button("Month-wise filings"):
+        with st.spinner(f"Reading DRHP / RHP filings of {mon:%B %Y}..."):
+            items, errs = regulatory.offer_documents_month(mon.year, mon.month, regulatory.SOURCES)
+        ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs,
+                                "period": f"{mon:%B %Y}"}
 
     ic = ss.regcheck.get("icdr")
     if ic:
@@ -259,7 +268,10 @@ with reg_tab:
                 st.success("No ICDR-related update after the app's format review date.")
     of = ss.regcheck.get("offer")
     if of:
-        st.subheader(f"Latest DRHP / RHP filings (checked {of['checked']})")
+        per = of.get("period", "Latest")
+        st.subheader(f"{'Latest DRHP / RHP filings' if per == 'Latest' else 'DRHP / RHP filings - ' + per} (checked {of['checked']})")
+        if per != "Latest" and not of["items"] and not of["errors"]:
+            st.info(f"No DRHP / RHP filings found for {per}.")
         for e in of["errors"]:
             st.warning(f"Could not read {e.split(':')[0]} - no internet access or the site refused the request. Open the source links below manually.")
             with st.expander("Technical detail"):

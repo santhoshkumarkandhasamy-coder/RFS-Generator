@@ -167,6 +167,56 @@ def offer_documents(urls=None, limit=20):
     return items, errors
 
 
+# SEBI listing pages load older rows through this endpoint (same sid / ssid / smid as the listing URL)
+LISTING_AJAX = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
+
+
+def _listing_ids(url):
+    q = dict(re.findall(r"[?&](sid|ssid|smid)=(\d+)", url or ""))
+    return q.get("sid", ""), q.get("ssid", ""), q.get("smid", "")
+
+
+def fetch_period(name, start, end, url=None, max_pages=25):
+    """Rows of a SEBI listing dated between start and end (inclusive), paging back through older rows."""
+    import requests
+    url = url or SOURCES[name]
+    sid, ssid, smid = _listing_ids(url)
+    rows = [it for it in parse_listing(_get(url))]
+    seen = {it["url"] for it in rows}
+    page = 1
+    while page < max_pages and (not rows or min((it["date"] for it in rows if it["date"]), default=end) >= start):
+        data = {"nextValue": str(page), "next": "n", "search": "", "fromDate": start.strftime("%d-%m-%Y"),
+                "toDate": end.strftime("%d-%m-%Y"), "fromYear": "", "toYear": "", "deptId": "-1", "sid": sid, "ssid": ssid,
+                "smid": smid, "ssidhidden": ssid, "intmid": "-1", "sText": "", "ssText": "", "smText": "", "doDirect": str(page)}
+        r = requests.post(LISTING_AJAX, data=data, timeout=25, headers={"User-Agent": "Mozilla/5.0 (RFS Generator)", "Referer": url})
+        r.raise_for_status()
+        new = [it for it in parse_listing(r.text) if it["url"] not in seen]
+        if not new:
+            break
+        rows += new
+        seen.update(it["url"] for it in new)
+        page += 1
+    return [it for it in rows if it["date"] and start <= it["date"] <= end]
+
+
+def offer_documents_month(year, month, urls=None):
+    """DRHP / RHP filings of one calendar month. Returns (items, errors)."""
+    import calendar
+    urls = urls or SOURCES
+    start = dt.date(year, month, 1)
+    end = dt.date(year, month, calendar.monthrange(year, month)[1])
+    items, errors = [], []
+    for name in ("Draft offer documents filed with SEBI (DRHP)", "Red herring documents filed with RoC (RHP)"):
+        try:
+            for it in fetch_period(name, start, end, urls.get(name)):
+                it["source"] = "DRHP" if "DRHP" in name else "RHP"
+                items.append(it)
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    items.sort(key=lambda x: x["date"] or dt.date.min, reverse=True)
+    return items, errors
+
+
 def pdf_links(page_url):
     """PDF links on a SEBI filing page (the DRHP / RHP document itself)."""
     from bs4 import BeautifulSoup
