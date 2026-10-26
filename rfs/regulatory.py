@@ -20,6 +20,14 @@ SOURCES = {
     "Draft offer documents filed with SEBI (DRHP)": "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10",
     "Red herring documents filed with RoC (RHP)": "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=16&smid=11",
 }
+# DRHP / offer document pages of the exchanges (pages, not APIs: the app reads what the page shows, so a moved page
+# only needs a new URL in Settings). Pages that build their list with JavaScript are read with a headless browser
+# (Playwright) when it is installed.
+EXCHANGE_SOURCES = {
+    "NSE - offer documents (Main board and Emerge)": "https://www.nseindia.com/companies-listing/corporate-filings-offer-documents",
+    "BSE - draft offer documents (Main board)": "https://www.bseindia.com/markets/PublicIssues/DraftOfferDocument.aspx",
+    "BSE SME - draft offer documents": "https://www.bsesme.com/PublicIssues/SMEIPODRHP.aspx",
+}
 MANUAL_LINKS = {
     "SEBI ICDR Regulations, 2018 (latest consolidated)": "https://www.sebi.gov.in/legal/regulations.html",
     "SEBI - Filings: public issues": "https://www.sebi.gov.in/filings/public-issues.html",
@@ -84,19 +92,26 @@ def _get(url, timeout=25):
     return r.text
 
 
-_DATE = re.compile(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2}, \d{4}\b")
+_MON = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+_DATES = [  # (pattern, strptime formats) - SEBI "Oct 26, 2026", exchanges "26-Oct-2026", "26/10/2026", "2026-10-26"
+    (re.compile(r"\b" + _MON + r" \d{1,2}, \d{4}\b"), ("%b %d, %Y", "%B %d, %Y")),
+    (re.compile(r"\b\d{1,2}[- ]" + _MON + r"[- ]\d{4}\b"), ("%d-%b-%Y", "%d %b %Y", "%d-%B-%Y", "%d %B %Y")),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), ("%Y-%m-%d",)),
+    (re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b"), ("%d/%m/%Y", "%d-%m-%Y")),
+]
 
 
 def _parse_date(t):
-    m = _DATE.search(t or "")
-    if not m:
-        return None
-    s = m.group(0).replace(".", "")
-    for f in ("%b %d, %Y", "%B %d, %Y"):
-        try:
-            return dt.datetime.strptime(s, f).date()
-        except ValueError:
-            pass
+    for rx, fmts in _DATES:
+        m = rx.search(t or "")
+        if not m:
+            continue
+        s_ = m.group(0).replace(".", "")
+        for f in fmts:
+            try:
+                return dt.datetime.strptime(s_, f).date()
+            except ValueError:
+                pass
     return None
 
 
@@ -217,8 +232,184 @@ def offer_documents_month(year, month, urls=None):
     return items, errors
 
 
+# ------------------------------------------------------------------ NSE / BSE
+def _doc_type(text):
+    t = (text or "").lower()
+    if "addendum" in t:
+        return "DRHP addendum" if "draft" in t or "drhp" in t else "Addendum"
+    if "draft" in t or "drhp" in t:
+        return "DRHP"
+    if "red herring" in t or "rhp" in t:
+        return "RHP"
+    if "prospectus" in t:
+        return "Prospectus"
+    return "Offer document"
+
+
+def company_name(title):
+    """'Oravel Stays Limited - Addendum to DRHP' -> 'Oravel Stays Limited' (for matching the same company across sources)."""
+    t = re.split(r"\s+[-–|]\s+|\s*\(", title or "")[0].strip()
+    m = re.search(r"^(.*?\b(limited|ltd\.?))", t, re.I)
+    return (m.group(1) if m else t).strip(" .,")
+
+
+def _norm_company(name):
+    n = re.sub(r"\b(limited|ltd|private|pvt|the|india)\b|[^a-z0-9]", "", (name or "").lower())
+    return n
+
+
+_NAME_KEYS = ("company", "companyname", "comp_name", "issuer", "issuername", "name", "symbol", "scrip", "title", "desc", "subject")
+_LINK_KEYS = ("attch", "attachment", "file", "pdf", "link", "url", "path", "doc")
+_DATE_KEYS = ("date", "dt", "filing", "submission", "uploaded", "created")
+
+
+def _json_rows(obj, base):
+    """Find lists of records in any JSON and turn each into {date, title, url}."""
+    out = []
+    if isinstance(obj, dict):
+        for v in obj.values():
+            out += _json_rows(v, base)
+    elif isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+        for rec in obj:
+            low = {str(k).lower().replace(" ", ""): v for k, v in rec.items()}
+            name = next((str(low[k]) for k in low if any(k == n or k.startswith(n) for n in _NAME_KEYS) and low[k]), "")
+            link = next((str(v) for k, v in low.items() if isinstance(v, str) and (v.lower().endswith(".pdf") or (any(n in k for n in _LINK_KEYS) and ("/" in v)))), "")
+            d = next((_parse_date(str(v)) for k, v in low.items() if any(n in k for n in _DATE_KEYS) and _parse_date(str(v))), None)
+            if name and (link or d):
+                if link and link.startswith("/"):
+                    link = base + link
+                out.append({"date": d, "title": name, "url": link,
+                            "text": " | ".join(str(v) for v in rec.values() if isinstance(v, str))[:400]})
+    elif isinstance(obj, list):
+        for v in obj:
+            out += _json_rows(v, base)
+    return out
+
+
+def _html_rows(html_text, base):
+    """Table rows with a date and a link (offer document PDF or detail page)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html_text, "html.parser")
+    out = []
+    for tr in soup.find_all("tr"):
+        a = tr.find("a", href=True)
+        txt = tr.get_text(" | ", strip=True)
+        d = _parse_date(txt)
+        if not a or not d:
+            continue
+        href = a["href"]
+        if href.startswith("javascript") or href == "#":
+            continue
+        if href.startswith("/"):
+            href = base + href
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+        name = next((c for c in cells if re.search(r"limited|ltd", c, re.I)), "") or a.get_text(" ", strip=True) or txt[:120]
+        out.append({"date": d, "title": name, "url": href, "text": txt})
+    return out
+
+
+def _browser_capture(url, timeout_ms=45000):
+    """Open the page in a headless browser; returns (rendered html, list of JSON bodies the page loaded)."""
+    from playwright.sync_api import sync_playwright
+    bodies = []
+    with sync_playwright() as p:
+        b = p.chromium.launch(executable_path=os.environ.get("RFS_CHROMIUM") or None)   # optional: use an installed Chrome / Chromium
+        try:
+            pg = b.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+            def on_resp(r):
+                try:
+                    if "json" in (r.headers.get("content-type") or ""):
+                        bodies.append(r.json())
+                except Exception:
+                    pass
+            pg.on("response", on_resp)
+            pg.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            pg.wait_for_timeout(2000)
+            html_text = pg.content()
+        finally:
+            b.close()
+    return html_text, bodies
+
+
+def exchange_listing(name, url=None):
+    """Offer documents listed on an exchange page. Tries a plain request first, then a headless browser."""
+    url = url or EXCHANGE_SOURCES[name]
+    base = re.match(r"https?://[^/]+", url).group(0)
+    rows, err = [], None
+    try:
+        import requests
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                             "Accept-Language": "en-US,en;q=0.9"})
+        sess.get(base, timeout=20)                 # exchanges set cookies on the home page first
+        r = sess.get(url, timeout=25)
+        r.raise_for_status()
+        rows = _html_rows(r.text, base)
+    except Exception as e:
+        err = e
+    if not rows:
+        try:
+            html_text, bodies = _browser_capture(url)
+            rows = _html_rows(html_text, base)
+            for b_ in bodies:
+                rows += _json_rows(b_, base)
+        except ImportError:
+            if err:
+                raise err
+            raise RuntimeError("the page builds its list with JavaScript - install the browser reader: "
+                               "pip install playwright, then: python -m playwright install chromium")
+    seen, out = set(), []
+    for it in rows:
+        k = (it["title"], it["url"])
+        if k in seen:
+            continue
+        seen.add(k)
+        it["source"] = _doc_type(it.get("text", "") + " " + it["title"] + " " + it["url"])
+        it["exchange"] = "NSE" if "nse" in name.lower() else ("BSE SME" if "sme" in name.lower() else "BSE")
+        out.append(it)
+    return out
+
+
+def all_offer_documents(sources=("SEBI", "NSE", "BSE"), month=None, urls=None, ex_urls=None):
+    """DRHP / RHP filings from SEBI, NSE and BSE (latest, or one month (year, month)). Returns (items, errors).
+    Items carry 'exchange' (where it was found) and 'seen_on' (all sources listing the same company)."""
+    import calendar
+    items, errors = [], []
+    if "SEBI" in sources:
+        its, errs = offer_documents_month(*month, urls) if month else offer_documents(urls)
+        for it in its:
+            it["exchange"] = "SEBI"
+        items += its; errors += errs
+    start = end = None
+    if month:
+        start = dt.date(month[0], month[1], 1)
+        end = dt.date(month[0], month[1], calendar.monthrange(*month)[1])
+    for name, u in (ex_urls or EXCHANGE_SOURCES).items():
+        if not any(src in name for src in sources):
+            continue
+        try:
+            for it in exchange_listing(name, u):
+                if start and not (it["date"] and start <= it["date"] <= end):
+                    continue
+                if it["source"] in ("DRHP", "RHP", "DRHP addendum", "Offer document", "Prospectus", "Addendum"):
+                    items.append(it)
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    groups = {}
+    for it in items:
+        it["company"] = company_name(it["title"])
+        groups.setdefault(_norm_company(it["company"]), set()).add(it["exchange"])
+    for it in items:
+        it["seen_on"] = ", ".join(sorted(groups[_norm_company(it["company"])]))
+    items.sort(key=lambda x: x["date"] or dt.date.min, reverse=True)
+    return items, errors
+
+
 def pdf_links(page_url):
-    """PDF links on a SEBI filing page (the DRHP / RHP document itself)."""
+    """PDF links on a SEBI filing page (the DRHP / RHP document itself). A direct PDF link is returned as is."""
+    if re.search(r"\.pdf($|\?)", page_url, re.I):
+        return [page_url]
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(_get(page_url), "html.parser")
     out = []

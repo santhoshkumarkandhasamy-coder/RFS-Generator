@@ -57,6 +57,8 @@ with st.sidebar:
     with st.expander("Settings - source URLs"):
         for k in list(regulatory.SOURCES):
             regulatory.SOURCES[k] = st.text_input(k, regulatory.SOURCES[k], key="url_" + k)
+        for k in list(regulatory.EXCHANGE_SOURCES):
+            regulatory.EXCHANGE_SOURCES[k] = st.text_input(k, regulatory.EXCHANGE_SOURCES[k], key="url_" + k)
 
 TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. Supporting documents", "5. Mapping review",
                 "6. Shareholders & ageing", "7. Adjustments", "8. Generate"])
@@ -236,9 +238,11 @@ with reg_tab:
         with st.spinner("Reading SEBI regulations and circulars..."):
             items, errs = regulatory.icdr_updates(regulatory.SOURCES)
         ss.regcheck["icdr"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs}
+    srcs = c2.multiselect("DRHP / RHP sources", ["SEBI", "NSE", "BSE"], default=["SEBI", "NSE", "BSE"], key="offer_srcs",
+                          help="SEBI: offer documents filed with SEBI / RoC. NSE: Main board and Emerge. BSE: Main board and BSE SME.")
     if c2.button("Check latest DRHP / RHP filings"):
-        with st.spinner("Reading SEBI offer document listings..."):
-            items, errs = regulatory.offer_documents(regulatory.SOURCES)
+        with st.spinner(f"Reading offer document listings ({', '.join(srcs)})..."):
+            items, errs = regulatory.all_offer_documents(srcs, None, regulatory.SOURCES, regulatory.EXCHANGE_SOURCES)
         ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs, "period": "Latest"}
     today = dt.date.today()
     months = [dt.date(today.year + (today.month - 1 - k) // 12, (today.month - 1 - k) % 12 + 1, 1) for k in range(24)]   # last 24 months
@@ -246,7 +250,7 @@ with reg_tab:
     mon = m1.selectbox("Month", months, format_func=lambda d: d.strftime("%B %Y"), key="offer_month", label_visibility="collapsed")
     if m2.button("Month-wise filings"):
         with st.spinner(f"Reading DRHP / RHP filings of {mon:%B %Y}..."):
-            items, errs = regulatory.offer_documents_month(mon.year, mon.month, regulatory.SOURCES)
+            items, errs = regulatory.all_offer_documents(srcs, (mon.year, mon.month), regulatory.SOURCES, regulatory.EXCHANGE_SOURCES)
         ss.regcheck["offer"] = {"checked": dt.datetime.now().isoformat(timespec="minutes"), "items": items, "errors": errs,
                                 "period": f"{mon:%B %Y}"}
 
@@ -301,15 +305,16 @@ with reg_tab:
             if sel_states and missing:
                 st.caption(f"{len(missing)} filing(s) have no location yet and are hidden by the filter - press Find company locations.")
 
-            df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "State": i.get("state", ""), "Link": i["url"]} for i in shown])
+            df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "Source": i.get("exchange", "SEBI"),
+                                "Filed / listed on": i.get("seen_on", ""), "State": i.get("state", ""), "Link": i["url"]} for i in shown])
             st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
             located = [it for it in items if it.get("state")]
             if located:
                 with st.expander("State-wise summary", expanded=True):
-                    sm = pd.DataFrame([{"State": it["state"], "Type": it["source"]} for it in located])
-                    st.dataframe(sm.pivot_table(index="State", columns="Type", aggfunc="size", fill_value=0).assign(Total=lambda d: d.sum(axis=1))
+                    sm = pd.DataFrame([{"State": it["state"], "Source": it.get("exchange", "SEBI")} for it in located])
+                    st.dataframe(sm.pivot_table(index="State", columns="Source", aggfunc="size", fill_value=0).assign(Total=lambda d: d.sum(axis=1))
                                  .sort_values("Total", ascending=False), width="stretch")
-            labels = [f"{i['date']} | {i['source']} | {i['title']}" + (f" | {i['state']}" if i.get("state") else "") for i in shown]
+            labels = [f"{i['date']} | {i.get('exchange', 'SEBI')} {i['source']} | {i['title']}" + (f" | {i['state']}" if i.get("state") else "") for i in shown]
             pick = st.selectbox("Use as format reference (downloads the offer document PDF and compares it)", ["-"] + labels)
             if pick != "-" and st.button("Download and compare"):
                 it = shown[labels.index(pick)]
@@ -329,7 +334,7 @@ with reg_tab:
                     st.warning(f"Download failed ({e}). Download the PDF from the link and upload it below.")
 
     with st.expander("Source links (open manually if the automatic check cannot reach them)"):
-        for k, v in {**regulatory.SOURCES, **regulatory.MANUAL_LINKS}.items():
+        for k, v in {**regulatory.SOURCES, **regulatory.EXCHANGE_SOURCES, **regulatory.MANUAL_LINKS}.items():
             st.markdown(f"- [{k}]({v})")
 
     st.subheader("Compare with a DRHP / RHP")
