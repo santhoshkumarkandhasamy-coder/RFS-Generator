@@ -31,12 +31,19 @@ Quickest way: drop all your files into **Upload input files (any format)** in th
    - Needs internet access. If SEBI cannot be reached the app says so and shows the source links to open manually; listing URLs can be edited in the sidebar (*Settings - source URLs*).
    - The checks and the reference document are recorded in a "Reference & Documents" sheet in the output.
 2. **Company** - press *Fill company details from uploaded documents* to read them from the uploaded audited financials / auditor's report / MCA data (name, former name, CIN, registered address, incorporation, year end, authorised capital, face value, 115BAA tax rate, auditor firm / FRN / partner / M.No. / UDIN / place / date, directors with DIN and designation; only empty fields are filled and a table shows where each was found). Fields: name, CIN, address, background, latest year end, authorised capital, face value, tax rate, closing stock (not carried in Tally), auditor, directors.
-3. **Trial balances** - upload the latest, previous and earliest year TB in **any format**: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), PowerPoint (.pptx / .ppt), PDF or OpenDocument. A Tally Excel export is used as-is; other formats are read as a table (Particulars / Opening / Debit / Credit / Closing, Dr/Cr) and rebuilt into a Tally-style sheet. The app checks Dr = Cr and that closing balances net to nil (shown in red if not).
+3. **Trial balances** - upload the latest, previous and earliest year TB (and the stub period TB when *Include a stub period* is ticked in the Company tab - the RFS then has a fourth column 'period ended ...' in every statement, note and annexure) in **any format**: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), PowerPoint (.pptx / .ppt), PDF or OpenDocument. A Tally Excel export is used as-is; other formats are read as a table (Particulars / Opening / Debit / Credit / Closing, Dr/Cr) and rebuilt into a Tally-style sheet. The app checks Dr = Cr and that closing balances net to nil (shown in red if not).
 4. **Supporting documents** - upload any number of documents (sanction letters, actuarial reports, ageing, registers, audited financials...) in the same formats. Text is extracted, can be categorised and searched, and the list goes into the output.
 5. **Mapping review** - every ledger gets a suggested note line ("Masters") from Tally group names and keywords, separately for debit and credit balances. Correct anything, press *Save mapping*, and download the mapping JSON to reuse next time.
 6. **Shareholders & ageing** - register of members (promoter flag) and receivables / payables ageing.
-7. **Adjustments** - restatement journal entries in lakhs (entry no., date, master, Dr, Cr, narration).
-8. **Generate** - choose output formats and download:
+7. **Restatement** - standard restatement adjustments, each posted automatically to 'Adj Entry RFS' as formula-linked entries (with deferred tax where applicable):
+   - *Fixed asset register* (upload, or pick from supporting documents): assets, class mapping to the PPE note lines, dates of deletion / sale value. The workbook gets an **FA Register** sheet (Schedule II WDV depreciation per asset and period, 5% residual value) and **FA Restatement** (register vs books by class); opening net block is aligned through reserves, depreciation and loss on deletion are restated each period. PPE adjusted directly through reserves in the books can be entered so it is reversed there.
+   - *Gratuity*: obligation as per actuarial valuation at every date (read from the reports where possible) and amounts charged directly to reserves in the books.
+   - *MSME interest* (Section 16): read from the MSME interest computations; no deferred tax (Section 23).
+   - *Current tax*: as per return of income (read from ITR acknowledgements); for a stub period, optionally computed on the restated taxable income.
+   - *Borrowing terms*: lender, facility, sanction, rate, tenure, security and guarantee read from sanction letters; outstanding linked to the TB ledger -> **Borrowing Terms** sheet.
+   Inputs sit in a **Restatement Inputs** sheet (yellow cells), so changing them in Excel updates every statement.
+8. **Adjustments** - restatement journal entries in lakhs (entry no., date, master, Dr, Cr, narration).
+9. **Generate** - choose output formats and download:
    - **Excel (.xlsx)** - the formula-linked RFS workbook
    - **Word (.docx / .doc)** - all annexures and notes as a document
    - **PowerPoint (.pptx)** - summary deck (statements, adjustments, ratios, capitalisation)
@@ -53,6 +60,7 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 | `app.py` | Streamlit UI |
 | `rfs/tally.py` | Reads Tally TB exports (Dr/Cr signs, group/ledger tree, repeated ledgers) and TBs in other formats |
 | `rfs/docreader.py` | Text and tables from Excel, CSV, Word, PowerPoint, PDF (legacy formats via LibreOffice / MS Office) |
+| `rfs/restate.py` | Readers for the fixed asset register, MSME interest computations, actuarial reports, ITR acknowledgements, sanction letters |
 | `rfs/regulatory.py` | Latest ICDR updates and DRHP / RHP filings from SEBI; DRHP restated-section comparison |
 | `rfs/classify.py` | Generic rules: Tally standard groups and ledger-name keywords -> Schedule III note line (works for any company; review in the app) |
 | `rfs/mapping.py` | Masters (note lines), suggestions, overrides |
@@ -64,7 +72,7 @@ Word / PowerPoint / HTML are rendered from calculated figures, so the app needs 
 - `.doc`, `.xls`, `.ppt` and OpenDocument inputs need LibreOffice (or Microsoft Office on Windows). Google Docs / Sheets: download as .docx / .xlsx first. Scanned (image-only) PDFs are not read - use a text PDF or the Excel export.
 - A TB that is not a Tally Excel export should keep groups and ledgers distinguishable (indentation, bold / italics or group totals); a flat list where Tally repeats ledgers may not reconcile - the app shows this in red.
 - The layout has no separate notes for investments or unsecured loans from non-directors: investments map to other current assets (fixed deposits to bank balances) and unsecured loans are shown lender-wise under loans from directors - change in the mapping review if needed.
-- Three financial years; a stub period is not yet supported.
+- Three financial years, plus an optional stub period. The stub TB's opening stock must equal the closing stock entered for the latest year end (check cell in Notes_Assets).
 - PPE is presented on net (WDV) movement from the TB; gross block needs the fixed asset register.
 - Review the yellow cells (inputs) and grey check cells in the output before issue.
 - Client files are not stored by the app beyond the session's temporary folder; `.xlsx` and project files are git-ignored.

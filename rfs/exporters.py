@@ -177,7 +177,7 @@ def read_tables(calc_path):
             continue
         ws = wb[name]
         cols = []
-        for c in range(2, min(ws.max_column, 11) + 1):  # B..K
+        for c in range(2, min(ws.max_column, 13) + 1):  # B..M (a stub period adds a column)
             letter = openpyxl.utils.get_column_letter(c)
             if ws.column_dimensions[letter].hidden:
                 continue

@@ -19,17 +19,42 @@ def build(cfg, data, src, out_path, overrides=None):
     """cfg: company / years / auditor / directors / shareholders / ageing / adjustments.
     data: {"FY26": rows, "FY25": rows, "FY24": rows} from tally.read_tb (latest, previous, earliest).
     src: same keys -> TB file paths (copied as-is into the TB sheets)."""
-    C = cfg
+    C = dict(cfg)
     A = cfg.get("auditor", {})
     Y = dict(cfg["years"])
     Y["d23"] = Y["d24"].replace(year=Y["d24"].year - 1)
+    STUB = cfg.get("stub") or None                      # {"end": date, "closing_stock": Rs} - interim period after the latest year
+    if STUB:
+        Y["dS"] = STUB["end"]
+    PK = (["FYS"] if STUB else []) + ["FY26", "FY25", "FY24"]      # periods in column order (latest first)
+    N = len(PK)
+    DK = {"FYS": "dS", "FY26": "d26", "FY25": "d25", "FY24": "d24"}
+    DKL = [DK[p_] for p_ in PK]
+    COLS = "".join(CL(4 + i) for i in range(N))        # period columns in notes / BS_1 / PL_2 (D, E, F[, G])
+    LASTC = COLS[-1]
+    OCOL = CL(4 + N)                                    # opening balance sheet column in notes
+    PCOLS = COLS[1:] + OCOL                             # column of the preceding period, for each period
+    CHK = "".join(CL(6 + N + i) for i in range(N))      # reviewer check cells in notes (after a gap column)
+    BSO = CL(5 + N)                                     # opening column on BS_1 (after a gap column)
+    BPRV = COLS[1:] + BSO
+    SHK = {"FYS": "sS", "FY26": "s26", "FY25": "s25", "FY24": "s24"}
+    PREVFY = {"FYS": "FY26", "FY26": "FY25", "FY25": "FY24"}
+    END = dict(DK)
+    START = {"FYS": "d26", "FY26": "d25", "FY25": "d24", "FY24": "d23"}
+
+    def per_lbl(k, pl=True):
+        return ("For the period ended\n" if k == "dS" else "For the year ended\n") if pl else "As at \n"
     SH = cfg.get("shareholders", [])
     D = data
     SRC = src
     OUT = out_path
-    TBN = {k: "TB " + _fy(Y[d]) for k, d in (("FY26", "d26"), ("FY25", "d25"), ("FY24", "d24"))}
-    DATES3 = f"{Y['d26']:%B %d, %Y}, {Y['d25']:%B %d, %Y} and {Y['d24']:%B %d, %Y}"
-    _tot = {k: sum(float(h.get(k, 0) or 0) for h in SH) for k in ("s26", "s25", "s24")}
+    TBN = {k: "TB " + _fy(Y[DK[k]]) for k in PK if k != "FYS"}
+    if STUB:
+        sy = Y["dS"].year if Y["dS"].month > 3 else Y["dS"].year - 1
+        TBN["FYS"] = f"TB {sy}-{str(sy + 1)[2:]}"
+    _dl = [f"{Y[k]:%B %d, %Y}" for k in DKL]
+    DATES3 = ", ".join(_dl[:-1]) + " and " + _dl[-1]
+    _tot = {SHK[k]: sum(float(h.get(SHK[k], 0) or 0) for h in SH) for k in PK}
     BIG = [j for j, h in enumerate(SH) if any(_tot[k] and float(h.get(k, 0) or 0) / _tot[k] > 0.05 for k in _tot)]
     DIRS = sorted({m[0] for fy in D for x in D[fy] if x["inc"] for m in [_master_for(x, 3, overrides)] if m and m[0].startswith(DIRECTOR_PREFIX)})
     ADJ_PL = []
@@ -109,6 +134,8 @@ def build(cfg, data, src, out_path, overrides=None):
         ("Scale", 100000, "scale"),
         (f"Closing stock-in-trade as at {Y['d26']:%B %d, %Y} (Rs)", float(C.get("closing_stock", 0)), "clstk"),
         ("Tax rate for current / deferred tax", float(C.get("tax_rate", 0.25168)), "tax"),
+    ] + ([("Period ended (stub period)", Y["dS"], "dS"),
+          (f"Closing stock-in-trade as at {Y['dS']:%B %d, %Y} (Rs)", float(STUB.get("closing_stock", 0) or 0), "clstkS")] if STUB else []) + [
         (None, None, None),
         ("Audit Firm Name", A.get("firm", "[Peer reviewed auditor]"), "firm"),
         ("Firm Reg No", A.get("frn", "[FRN]"), "frn"),
@@ -128,7 +155,7 @@ def build(cfg, data, src, out_path, overrides=None):
             if isinstance(val, datetime.date): c.number_format = "dd-mm-yyyy"
             elif key == "tax": c.number_format = "0.000%"
             elif isinstance(val, (int, float)): c.number_format = "#,##0"
-            if key in ("clstk", "bonus"): c.fill = yel
+            if key in ("clstk", "clstkS", "bonus"): c.fill = yel
             md[key] = f"{MD}!$B${r}"
         r += 1
     w(ws, "F15", "All amounts in Indian Rupees Lakhs, except as otherwise stated", fI)
@@ -159,7 +186,7 @@ def build(cfg, data, src, out_path, overrides=None):
     # ------------------------------------------------------------------ TB sheets (replica of Tally export + Masters)
     used_labels = set()
     TBROW = {}
-    for fy in ["FY26", "FY25", "FY24"]:
+    for fy in PK:
         src = openpyxl.load_workbook(SRC[fy]).active
         ws = wb.create_sheet(TBN[fy])
         for row in src.iter_rows():
@@ -220,6 +247,242 @@ def build(cfg, data, src, out_path, overrides=None):
         return f"SUMIF({s}!${mcol}:${mcol},{label_ref},{s}!${col}:${col})"
 
 
+    # ------------------------------------------------------------------ restatement workings: inputs, FA register, automatic entries
+    RST = C.get("restatement") or {}
+    AUTO = []                                   # automatic entries: same structure as manual ones, amounts are formulas (Rs. lakhs)
+    TAXQ = '"Current tax"'
+    CHRON = list(reversed(PK))                  # FY24 ... latest (stub last)
+
+    def leg(master, amt, to=False):             # positive amount = debit; the MAX pair keeps the entry balanced whatever the sign
+        return {"master": master, "dr": f"=MAX({amt},0)", "cr": f"=MAX(-({amt}),0)", "to": to}
+
+    def book(label, key):                       # book balance (lakhs) of a Masters label at a period end ('OPEN' = opening balance sheet)
+        lb = '"' + label + '"'
+        return tb_open_(lb) if key == "OPEN" else tbf_(key, lb)
+
+    def tbf_(fy, ref, col="I", mcol="G"):
+        s_ = q(TBN[fy])
+        return f"SUMIF({s_}!${mcol}:${mcol},{ref},{s_}!${col}:${col})"
+
+    def tb_open_(ref):
+        return tbf_("FY24", ref, "L", "J")
+
+    def prev_key(p_):
+        return PREVFY.get(p_, "OPEN")
+
+    INP = {}
+    if any(RST.get(k) for k in ("gratuity", "msme", "tax")) or (RST.get("fa") or {}).get("assets"):
+        RI = "Restatement Inputs"
+        wsI = sheet(RI, {"A": 70, **{CL(2 + i): 16 for i in range(N + 1)}, CL(3 + N): 50})
+        w(wsI, "A1", "Inputs for restatement adjustments (amount in Rs.; yellow cells are inputs - entries in 'Adj Entry RFS' update automatically)", fB)
+        hdr = ["d23"] + [DK[p_] for p_ in CHRON]
+        w(wsI, "A3", "Particulars", fB, bd=bTB)
+        for i, k in enumerate(hdr):
+            w(wsI, f"{CL(2 + i)}3", dtxt(k, "As at / period ended\n"), fB, bd=bTB, al=wrapc)
+        wsI.row_dimensions[3].height = 30
+        HC = {k: CL(2 + i) for i, k in enumerate(hdr)}            # column of each date key
+        rr = 4
+
+        def inrow(label, key, values, dates, note=""):
+            nonlocal rr
+            w(wsI, f"A{rr}", label)
+            for k in dates:
+                v = values.get(k)
+                c = w(wsI, f"{HC[k]}{rr}", float(v) if v not in (None, "") else None, fBlue, ACC, fill=yel)
+            if note: w(wsI, f"{CL(3 + N)}{rr}", note, fG)
+            INP[key] = {k: f"{q(RI)}!${HC[k]}${rr}" for k in dates}
+            rr += 1
+
+        per_dates = [DK[p_] for p_ in CHRON]
+        g = RST.get("gratuity") or {}
+        if g.get("dbo"):
+            inrow("Gratuity - defined benefit obligation as per actuarial valuation (Rs)", "dbo", g["dbo"], hdr, "Actuarial valuation reports")
+            inrow("Gratuity charged directly to reserves in the books during the period (Rs)", "gdir", g.get("direct", {}), per_dates,
+                  "Reclassified to the Statement of Profit and Loss")
+        if RST.get("msme"):
+            inrow("Interest on delayed payments to MSME for the period - Section 16 of the MSMED Act (Rs)", "msme", RST["msme"], per_dates,
+                  "MSME interest computations")
+        if (RST.get("fa") or {}).get("assets"):
+            inrow("Property, Plant and Equipment adjusted directly through reserves in the books during the period (Rs; increase in PPE +)", "fadir",
+                  RST["fa"].get("direct", {}), per_dates, "Reversed against reserves (restated values are as per the register)")
+        tx_ = RST.get("tax") or {}
+        if any(v not in (None, "", "computed") for v in tx_.values()):
+            inrow("Current tax as per return of income / tax computation (Rs) - blank: no adjustment", "tax",
+                  {DK[k]: v for k, v in tx_.items() if v != "computed" and k in DK}, per_dates, "Income-tax returns / computation of total income")
+
+    # gratuity: provision restated to the actuarial obligation at every date, change through the Statement of Profit and Loss
+    if "dbo" in INP:
+        G_, PG = INP["dbo"], "Provision for gratuity"
+        x0 = f"({G_['d23']}/{SCALE}-{book(PG, 'OPEN')})"
+        AUTO.append({"date": f"={md['d23']}", "auto": True, "narration": "Being gratuity liability relating to periods up to the opening balance sheet date, "
+                     "as per actuarial valuation, adjusted against opening reserves, with deferred tax thereon",
+                     "legs": [leg("Reserves and surplus", x0), leg(PG, f"-{x0}", True),
+                              leg("Deferred tax asset (net)", f"{x0}*{md['tax']}"), leg("Reserves and surplus", f"-{x0}*{md['tax']}", True)]})
+        for p_ in CHRON:
+            e_, s_ = DK[p_], START[p_]
+            dlt = f"(({G_[e_]}-{G_[s_]})/{SCALE}-({book(PG, p_)}-{book(PG, prev_key(p_))}))"
+            dr_ = f"(N({INP['gdir'][e_]})/{SCALE})"
+            AUTO.append({"date": f"={md[e_]}", "auto": True, "narration": f"Being gratuity expense for the {'period' if p_ == 'FYS' else 'year'} ended "
+                         f"{Y[e_]:%B %d, %Y} restated as per actuarial valuation (including amounts charged directly to reserves in the books), "
+                         "with deferred tax on the change in provision",
+                         "legs": [leg("Gratuity", f"{dlt}+{dr_}"), leg(PG, f"-{dlt}", True), leg("Reserves and surplus", f"-{dr_}", True),
+                                  leg("Deferred tax asset (net)", f"{dlt}*{md['tax']}"), leg("Deferred tax", f"-{dlt}*{md['tax']}", True)]})
+    # MSME interest (Section 16) - not deductible (Section 23), so no deferred tax
+    if "msme" in INP:
+        for p_ in CHRON:
+            m_ = INP["msme"][DK[p_]]
+            x_ = f'IF({m_}="",0,{m_}/{SCALE}-{book("Interest on delayed payments to MSME", p_)})'
+            AUTO.append({"date": f"={md[DK[p_]]}", "auto": True, "narration": f"Being interest under Section 16 of the MSMED Act on delayed payments to micro and small "
+                         f"enterprises for the {'period' if p_ == 'FYS' else 'year'} ended {Y[DK[p_]]:%B %d, %Y}, as per the MSME interest computation",
+                         "legs": [leg("Interest on delayed payments to MSME", x_), leg("Interest accrued on dues to MSME", f"-({x_})", True)]})
+    # current tax: as per return / computation, or computed on the restated taxable income ("computed")
+    for p_ in CHRON:
+        v_ = (RST.get("tax") or {}).get(p_)
+        if v_ in (None, ""):
+            continue
+        if v_ == "computed":
+            x_ = f"({{TAXTP_{p_}}}-{book('Current tax', p_)})"
+            what = "on the restated taxable income ('Tax Computation')"
+        else:
+            t_ = INP["tax"][DK[p_]]
+            x_ = f'IF({t_}="",0,{t_}/{SCALE}-{book("Current tax", p_)})'
+            what = "as per the return of income / computation of total income"
+        AUTO.append({"date": f"={md[DK[p_]]}", "auto": True, "narration": f"Being current tax for the {'period' if p_ == 'FYS' else 'year'} ended "
+                     f"{Y[DK[p_]]:%B %d, %Y} restated {what}",
+                     "legs": [leg("Current tax", x_), leg("Provision for income tax (net of advance tax)", f"-({x_})", True)]})
+
+    # fixed asset register (Schedule II, written down value, 5% residual value) and class-wise restatement
+    FA = (RST.get("fa") or {}).get("assets") or []
+    FAR = {}
+    if FA:
+        FRG, FRS = "FA Register", "FA Restatement"
+        wsF = sheet(FRG, {"A": 6, "B": 40, "C": 24, "D": 12, "E": 14, "F": 9, "G": 12, "H": 12, "I": 14})
+        w(wsF, "A1", "Fixed Asset Register - depreciation as per Schedule II to the Companies Act, 2013 (written down value method, residual value 5%); amount in Rs.", fB)
+        w(wsF, "A2", "Source: fixed asset register furnished by the management. Rate = 1 - 0.05^(1/useful life); depreciation pro rata for additions / deletions.", fI)
+        heads = ["Sr.", "Asset", "Class (note line)", "Date put to use", "Cost", "WDV rate", "Date of deletion", "Sale value", dtxt("d23", "WDV as at\n")]
+        FCOL = {}
+        col = 10
+        for p_ in CHRON:
+            FCOL[p_] = {f: CL(col + j) for j, f in enumerate(["open", "add", "dep", "del", "close"])}
+            for j, h in enumerate(["Opening WDV", "Additions", "Depreciation", "Deletions (WDV)", "Closing WDV"]):
+                w(wsF, f"{CL(col + j)}4", f"{h}\n{'period' if p_ == 'FYS' else 'FY'} {_fy(Y[DK[p_]]) if p_ != 'FYS' else Y[DK[p_]].strftime('%b-%y')}", fB, bd=bTB, al=wrapc)
+                wsF.column_dimensions[CL(col + j)].width = 13
+            col += 5
+        for i, h in enumerate(heads):
+            w(wsF, f"{CL(1 + i)}4", h, fB, bd=bTB, al=wrapc)
+        wsF.row_dimensions[4].height = 42
+        d23 = md["d23"]
+        r = 5
+        for k, a_ in enumerate(FA):
+            w(wsF, f"A{r}", k + 1); w(wsF, f"B{r}", a_.get("name", "")); w(wsF, f"C{r}", a_.get("class", ""))
+            w(wsF, f"D{r}", a_.get("date"), fBlue, "dd-mm-yyyy"); w(wsF, f"E{r}", float(a_.get("cost") or 0), fBlue, ACC)
+            life = a_.get("life")
+            rate = a_.get("rate")
+            if rate in (None, "") and life:
+                w(wsF, f"F{r}", f"=1-0.05^(1/{float(life)})", fN, "0.00%")
+            else:
+                w(wsF, f"F{r}", float(rate or 0), fBlue, "0.00%")
+            if a_.get("del_date"): w(wsF, f"G{r}", a_["del_date"], fBlue, "dd-mm-yyyy")
+            if a_.get("sale"): w(wsF, f"H{r}", float(a_["sale"]), fBlue, ACC)
+            fye = f"DATE(YEAR(D{r})+IF(MONTH(D{r})>3,1,0),3,31)"
+            w(wsF, f"I{r}", f'=IF(OR(D{r}="",D{r}>{d23},AND(G{r}<>"",G{r}<={d23})),0,E{r}*(1-F{r}*MIN(1,({fye}-D{r}+1)/365))'
+                            f'*(1-F{r})^MAX(0,YEAR({d23})-YEAR({fye})))', fN, ACC)
+            prev_close = f"I{r}"
+            for p_ in CHRON:
+                c_ = FCOL[p_]; S_, E_ = md[START[p_]], md[DK[p_]]
+                deld = f'AND(G{r}<>"",G{r}>{S_},G{r}<={E_})'
+                upto = f"IF({deld},G{r},{E_})"
+                w(wsF, f"{c_['open']}{r}", f"={prev_close}", fN, ACC)
+                w(wsF, f"{c_['add']}{r}", f"=IF(AND(D{r}>{S_},D{r}<={E_}),E{r},0)", fN, ACC)
+                w(wsF, f"{c_['dep']}{r}", f"=IF({c_['add']}{r}>0,{c_['add']}{r}*F{r}*({upto}-D{r}+1)/365,{c_['open']}{r}*F{r}*({upto}-{S_})/365)", fN, ACC)
+                w(wsF, f"{c_['del']}{r}", f"=IF({deld},{c_['open']}{r}+{c_['add']}{r}-{c_['dep']}{r},0)", fN, ACC)
+                w(wsF, f"{c_['close']}{r}", f"={c_['open']}{r}+{c_['add']}{r}-{c_['dep']}{r}-{c_['del']}{r}", fN, ACC)
+                prev_close = f"{c_['close']}{r}"
+            r += 1
+        FA_LAST = r - 1
+        w(wsF, f"B{r}", "Total", fB, bd=bTot)
+        for cc in ["E", "I"] + [c_ for p_ in CHRON for c_ in FCOL[p_].values()]:
+            w(wsF, f"{cc}{r}", f"=SUM({cc}5:{cc}{FA_LAST})", fB, ACC, bd=bTot)
+        wsF.freeze_panes = "C5"
+
+        # class-wise summary vs books (lakhs)
+        classes = [c_ for c_ in ["Land", "Buildings", "Furniture and fittings", "Vehicles", "Office equipment", "Electrical installations", "Computers",
+                                 "Computer software"] if any(a_.get("class") == c_ for a_ in FA)]
+        wsR2 = sheet(FRS, {"A": 34, **{CL(2 + j): 14 for j in range(10)}})
+        w(wsR2, "A1", "Restatement of Property, Plant and Equipment and Intangible assets as per the Fixed Asset Register (Rs. in lakhs)", fB)
+        w(wsR2, "A2", "Register figures from 'FA Register'; book figures from the trial balances (Masters). Differences are restated through 'Adj Entry RFS'.", fI)
+        rg = lambda c_, cell: f"SUMIF({q(FRG)}!$C$5:$C${FA_LAST},{c_},{q(FRG)}!{cell}5:{cell}{FA_LAST})/{SCALE}"
+        r = 4
+        for p_ in CHRON:
+            e_ = DK[p_]
+            w(wsR2, f"A{r}", ("Period" if p_ == "FYS" else "Year") + f" ended {Y[e_]:%B %d, %Y}", fB); r += 1
+            hh = ["Class", "Opening WDV (register)", "Additions (register)", "Depreciation (register)", "Deletions WDV (register)", "Sale value",
+                  "Closing WDV (register)", "Opening (books)", "Additions (books)", "Closing (books)", "Additions difference"]
+            for j, h in enumerate(hh):
+                w(wsR2, f"{CL(1 + j)}{r}", h, fB, bd=bTB, al=wrapc)
+            wsR2.row_dimensions[r].height = 30; r += 1
+            first = r
+            for c_ in classes:
+                cq = f'"{c_}"'
+                w(wsR2, f"A{r}", c_)
+                fc = FCOL[p_]
+                w(wsR2, f"B{r}", "=" + rg(f"$A{r}", fc["open"]), fmt=ACC)
+                w(wsR2, f"C{r}", "=" + rg(f"$A{r}", fc["add"]), fmt=ACC)
+                w(wsR2, f"D{r}", "=" + rg(f"$A{r}", fc["dep"]), fmt=ACC)
+                w(wsR2, f"E{r}", "=" + rg(f"$A{r}", fc["del"]), fmt=ACC)
+                w(wsR2, f"F{r}", f'=SUMIFS({q(FRG)}!$H$5:$H${FA_LAST},{q(FRG)}!$C$5:$C${FA_LAST},$A{r},{q(FRG)}!$G$5:$G${FA_LAST},">"&{md[START[p_]]},'
+                                 f'{q(FRG)}!$G$5:$G${FA_LAST},"<="&{md[e_]})/{SCALE}', fmt=ACC)
+                w(wsR2, f"G{r}", "=" + rg(f"$A{r}", fc["close"]), fmt=ACC)
+                w(wsR2, f"H{r}", "=" + book(c_, prev_key(p_)), fmt=ACC)
+                w(wsR2, f"I{r}", "=" + tbf_(p_, cq, "C") + f"/{SCALE}", fmt=ACC)
+                w(wsR2, f"J{r}", "=" + book(c_, p_), fmt=ACC)
+                w(wsR2, f"K{r}", f"=ROUND(C{r}-I{r},2)", fS, ACC)
+                FAR[(p_, c_)] = {k: f"{q(FRS)}!${col_}${r}" for k, col_ in
+                                 zip(["open", "add", "dep", "del", "sale", "close", "bopen", "badd", "bclose"], "BCDEFGHIJ")}
+                r += 1
+            w(wsR2, f"A{r}", "Total", fB, bd=bTot)
+            for col_ in "BCDEFGHIJ":
+                w(wsR2, f"{col_}{r}", f"=SUM({col_}{first}:{col_}{r - 1})", fB, ACC, bd=bTot)
+            FAR[(p_, "TOTAL")] = {k: f"{q(FRS)}!${col_}${r}" for k, col_ in zip(["open", "add", "dep", "del", "sale", "close", "bopen", "badd", "bclose"], "BCDEFGHIJ")}
+            r += 1
+            w(wsR2, f"A{r}", "Depreciation and amortisation as per books")
+            w(wsR2, f"D{r}", "=" + book("Depreciation and amortisation", p_), fmt=ACC)
+            FAR[(p_, "BOOKDEP")] = f"{q(FRS)}!$D${r}"
+            r += 2
+        w(wsR2, f"A{r}", "Additions difference (grey) should be nil: additions in the register should agree with the books. A difference is taken to "
+                         "'Miscellaneous expenses' by the restatement entry - review it.", fI)
+
+        # entries: opening alignment, then each period (class legs keep the PPE notes on register values)
+        t_ = md["tax"]
+        p0 = CHRON[0]
+        x0 = {c_: f"({FAR[(p0, c_)]['open']}-{FAR[(p0, c_)]['bopen']})" for c_ in classes}
+        sx0 = "(" + "+".join(x0.values()) + ")"
+        AUTO.append({"date": f"={md['d23']}", "auto": True, "narration": "Being net block as at the opening balance sheet date aligned with the Fixed Asset Register "
+                     "(Schedule II, WDV), adjusted against opening reserves, with deferred tax thereon",
+                     "legs": [leg(c_, x0[c_]) for c_ in classes] + [leg("Reserves and surplus", f"-{sx0}", True),
+                              leg("Deferred tax asset (net)", f"-{sx0}*{t_}"), leg("Reserves and surplus", f"{sx0}*{t_}", True)]})
+        for p_ in CHRON:
+            dc = {c_: f"(({FAR[(p_, c_)]['close']}-{FAR[(p_, c_)]['bclose']})-({FAR[(p_, c_)]['open']}-{FAR[(p_, c_)]['bopen']}))" for c_ in classes}
+            sdc = "(" + "+".join(dc.values()) + ")"
+            depd = f"({FAR[(p_, 'TOTAL')]['dep']}-{FAR[(p_, 'BOOKDEP')]})"
+            fdir = f"(N({INP['fadir'][DK[p_]]})/{SCALE})"           # book PPE change routed through reserves - reversed there, not in P&L
+            resid = f"(-({depd}+{sdc})-{fdir})"
+            ple = f"({depd}+{resid})"
+            AUTO.append({"date": f"={md[DK[p_]]}", "auto": True, "narration": f"Being depreciation and loss on deletion of assets for the "
+                         f"{'period' if p_ == 'FYS' else 'year'} ended {Y[DK[p_]]:%B %d, %Y} restated as per the Fixed Asset Register "
+                         "(Schedule II, WDV), with deferred tax thereon",
+                         "legs": [leg("Depreciation and amortisation", depd), leg("Miscellaneous expenses", resid), leg("Reserves and surplus", fdir)]
+                                 + [leg(c_, dc[c_], True) for c_ in classes]
+                                 + [leg("Deferred tax asset (net)", f"({ple}+{fdir})*{t_}"), leg("Deferred tax", f"-{ple}*{t_}", True),
+                                    leg("Reserves and surplus", f"-{fdir}*{t_}", True)]})
+
+    C["adjustments"] = AUTO + list(cfg.get("adjustments", []))
+    ADJ_PL = []
+    for _e in C["adjustments"]:
+        for _l in _e["legs"]:
+            if label_info(_l["master"])[1] == "P&L" and _l["master"] not in ADJ_PL:
+                ADJ_PL.append(_l["master"])
+
     # ------------------------------------------------------------------ Adj Entry RFS (journal, Rs. lakhs)
     ADJ = "Adj Entry RFS"
     wsA = sheet(ADJ, {"A": 12, "B": 70, "C": 40, "D": 8, "E": 14, "F": 14})
@@ -231,17 +494,20 @@ def build(cfg, data, src, out_path, overrides=None):
         r0 = r
         for i, leg in enumerate(ent["legs"]):
             w(wsA, f"A{r}", ent["date"] if i == 0 else f"=A{r0}", fmt="dd-mm-yyyy")
-            is_cr = bool(leg.get("cr")) and not leg.get("dr")
+            if i == 0 and ent.get("auto"): wsA[f"A{r}"].font = fN
+            is_cr = leg.get("to", bool(leg.get("cr")) and not leg.get("dr"))
             w(wsA, f"B{r}", ("   To " if is_cr else "") + leg.get("particulars", leg["master"]))
             w(wsA, f"C{r}", leg["master"], fG); w(wsA, f"D{r}", label_info(leg["master"])[1], fG)
-            if leg.get("dr"): w(wsA, f"E{r}", float(leg["dr"]), fBlue, ACC)
-            if leg.get("cr"): w(wsA, f"F{r}", float(leg["cr"]), fBlue, ACC)
+            for col, side in (("E", "dr"), ("F", "cr")):    # amounts: numbers (manual entries) or formulas (automatic entries)
+                v = leg.get(side)
+                if isinstance(v, str) and v.startswith("="): w(wsA, f"{col}{r}", v, fN, ACC)
+                elif v: w(wsA, f"{col}{r}", float(v), fBlue, ACC)
             r += 1
         if ent.get("narration"):
             w(wsA, f"B{r}", "(" + ent["narration"].strip().strip("()") + ")", fI, al=wrapl)
             wsA.row_dimensions[r].height = 26
         r += 2
-    ADJ_LAST = r + 20
+    ADJ_LAST = r + 40
     w(wsA, f"B{r}", "Further adjustments, if any, may be added above this line using the same Masters names as in BS_1 / PL_2.", fG)
     AR = lambda col: f"{q(ADJ)}!${col}$3:${col}${ADJ_LAST}"
 
@@ -265,7 +531,8 @@ def build(cfg, data, src, out_path, overrides=None):
 
 
     # ------------------------------------------------------------------ common header / signature
-    def head(ws, title, units=True, col="B", span="F"):
+    def head(ws, title, units=True, col="B", span=None):
+        span = span or LASTC
         w(ws, f"{col}2", f"={md['name']}", fB); w(ws, f"{col}3", f"={md['former']}", fB); w(ws, f"{col}4", f'="CIN: "&{md["cin"]}', fB)
         w(ws, f"{col}5", title, fB)
         if units: w(ws, f"{col}6", "(All amounts in Rs. lakhs, except as otherwise stated)", fI)
@@ -276,7 +543,8 @@ def build(cfg, data, src, out_path, overrides=None):
             ws.merge_cells(f"{col}6:{span}6"); ws[f"{col}6"].alignment = Alignment(horizontal="center")
 
 
-    def sign_block(ws, r, cB="B", cD="D", cF="F"):
+    def sign_block(ws, r, cB="B", cD="D", cF=None):
+        cF = cF or LASTC
         w(ws, f"{cB}{r}", "As per our report of even date attached"); r += 2
         w(ws, f"{cB}{r}", f'="for "&{md["firm"]}', fB); w(ws, f"{cD}{r}", "for and on behalf of the Board of Directors of", fI); r += 1
         w(ws, f"{cB}{r}", "Chartered Accountants", fI); w(ws, f"{cD}{r}", f"={md['name']}", fB); r += 1
@@ -306,12 +574,13 @@ def build(cfg, data, src, out_path, overrides=None):
     w(wsS, "B12", "=B8+1", fB); w(wsS, "C12", "SIGNIFICANT ACCOUNTING POLICIES", fB)
     pol = [
         "a) Basis of preparation\nThe Restated Summary Statement of Assets and Liabilities of the Company as at " + DATES3 + " and the related Restated "
-        "Summary Statements of Profit and Loss and Cash Flows for the years then ended, together with the annexures thereto (collectively, the \"Restated Summary Statements\"), have been "
+        "Summary Statements of Profit and Loss and Cash Flows for the " + ("period / years" if STUB else "years") + " then ended, together with the annexures thereto (collectively, the \"Restated Summary Statements\"), have been "
         "prepared specifically for inclusion in the Draft Red Herring Prospectus / Red Herring Prospectus / Prospectus to be filed by the Company with the SME Platform of the Stock "
         "Exchange in connection with its proposed Initial Public Offer. The Restated Summary Statements have been prepared to comply with Section 26 of Part I of Chapter III of the "
         "Companies Act, 2013, the Securities and Exchange Board of India (Issue of Capital and Disclosure Requirements) Regulations, 2018, as amended, and the Guidance Note on Reports "
         "in Company Prospectuses (Revised 2019) issued by the Institute of Chartered Accountants of India.",
-        "The Restated Summary Statements have been compiled from the audited financial statements of the Company for the years ended " + DATES3 + ", "
+        "The Restated Summary Statements have been compiled from the audited financial statements of the Company for the years ended "
+        + (", ".join(_dl[1:-1]) + " and " + _dl[-1] + " and the special purpose interim financial statements for the period ended " + _dl[0] if STUB else DATES3) + ", "
         "prepared under the historical cost convention on accrual basis in accordance with the Accounting Standards specified under Section 133 of the Companies Act, 2013 read with the "
         "Companies (Accounting Standards) Rules, 2021, and are presented in the format prescribed in Division I of Schedule III to the Act.",
         "Operating Cycle:\nAll assets and liabilities have been classified as current or non-current as per the Company's normal operating cycle and other criteria set out in Schedule III. "
@@ -363,10 +632,7 @@ def build(cfg, data, src, out_path, overrides=None):
     RPT, GC, TX, AR_, AN, CP, AD = "RPT", "Gratuity and contingencies", "Tax Computation", "Accounting ratios", "Analytical Ratios", "Capitalisation", "Additional Disclosures"
     SR, DRA, CRA = "Shareholder Register", "Debtor Ageing", "Creditor Ageing"
     INCOME = {"Sale of products", "Sale of services", "Other operating revenue", "Interest income", "Other non-operating income"}
-    FYL = ["FY26", "FY25", "FY24"]
-    PREVFY = {"FY26": "FY25", "FY25": "FY24"}
-    END = {"FY26": "d26", "FY25": "d25", "FY24": "d24"}
-    START = {"FY26": "d25", "FY25": "d24", "FY24": "d23"}
+    FYL = PK
 
 
     def nz(f): return f[1:] if f.startswith("=") else f
@@ -386,8 +652,9 @@ def build(cfg, data, src, out_path, overrides=None):
 
 
     def note_sheet(name, span="G"):
-        ws = sheet(name, {"A": 1, "B": 5, "C": 60, "D": 16.8, "E": 16.8, "F": 16.8, "G": 15, "H": 3, "I": 12, "J": 12, "K": 12})
-        head(ws, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span="F")
+        wd = {"A": 1, "B": 5, "C": 60, **{c: 16.8 for c in COLS}, OCOL: 15, CL(5 + N): 3, **{c: 12 for c in CHK}}
+        ws = sheet(name, wd)
+        head(ws, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span=LASTC)
         return ws
 
 
@@ -403,17 +670,16 @@ def build(cfg, data, src, out_path, overrides=None):
             self.pl = pl
             r += 2
             w(ws, f"C{r}", "Particulars", fB, bd=bTB)
-            pre = "For the year ended\n" if pl else "As at \n"
-            for i, k in enumerate(["d26", "d25", "d24"]):
-                w(ws, f"{'DEF'[i]}{r}", dtxt(k, pre), fB, bd=bTB, al=wrapc)
+            for i, k in enumerate(DKL):
+                w(ws, f"{COLS[i]}{r}", dtxt(k, per_lbl(k, pl)), fB, bd=bTB, al=wrapc)
             if not pl:
-                w(ws, f"G{r}", dtxt("d23"), fG, bd=bTB, al=wrapc)
+                w(ws, f"{OCOL}{r}", dtxt("d23"), fG, bd=bTB, al=wrapc)
             ws.row_dimensions[r].height = 30
             self.r = r + 1
 
-        def cols(self): return "DEF" if self.pl else "DEFG"
+        def cols(self): return COLS if self.pl else COLS + OCOL
 
-        def tb(self, label, nat, adj=False, show=None):
+        def tb(self, label, nat, adj=True, show=None):
             """note line linked to TB: SUMIF(TB Masters, C, TB In Lakhs)"""
             ws, r = self.ws, self.r
             w(ws, f"C{r}", label)
@@ -421,11 +687,11 @@ def build(cfg, data, src, out_path, overrides=None):
                 f = "=" + tbf(fy, f"$C{r}")
                 if adj:
                     f += "+" + (nz(adj_pl(f"$C{r}", END[fy], START[fy], nat)) if self.pl else "(" + nz(adj_bs(f"$C{r}", END[fy], nat)) + ")")
-                w(ws, f"{'DEF'[i]}{r}", f, fmt=ACC)
+                w(ws, f"{COLS[i]}{r}", f, fmt=ACC)
             if not self.pl:
                 f = "=" + tb_open(f"$C{r}")
                 if adj: f += "+(" + nz(adj_bs(f"$C{r}", "d23", nat)) + ")"
-                w(ws, f"G{r}", f, fG, ACC)
+                w(ws, f"{OCOL}{r}", f, fG, ACC)
             NR[label] = (ws.title, r)
             self.r += 1
             return r
@@ -437,7 +703,7 @@ def build(cfg, data, src, out_path, overrides=None):
                 for i, col in enumerate(cols or self.cols()):
                     v = f(i, col) if callable(f) else f
                     if v is not None:
-                        w(ws, f"{col}{r}", v, fG if col == "G" else (fB if bold else fN), fmt, bd=bd)
+                        w(ws, f"{col}{r}", v, fG if (col == OCOL and not self.pl) else (fB if bold else fN), fmt, bd=bd)
             self.r += 1
             return r
 
@@ -448,7 +714,7 @@ def build(cfg, data, src, out_path, overrides=None):
 
         def text(self, t, h=1):
             ws, r = self.ws, self.r
-            w(ws, f"C{r}", t, al=just); ws.merge_cells(f"C{r}:F{r}")
+            w(ws, f"C{r}", t, al=just); ws.merge_cells(f"C{r}:{LASTC}{r}")
             ws.row_dimensions[r].height = 14 * h
             self.r += 1
 
@@ -484,36 +750,36 @@ def build(cfg, data, src, out_path, overrides=None):
             "preferential amounts, in proportion to their shareholding.", 3)
     ne.gap()
     ne.line("(a) Reconciliation of the number of shares outstanding at the beginning and at the end of the year", bold=True)
-    sh_b = ne.line("No. of shares at the beginning of the year", lambda i, c: f"={'EFG'[i]}{sc_tot}*{SCALE}/{md['fv']}", fmt=ACC0, cols="DEF")
-    sh_i = ne.line("Add: Shares issued during the year", lambda i, c: f"={c}{sc_tot}*{SCALE}/{md['fv']}-{c}{sh_b}", fmt=ACC0, cols="DEF")
-    sh_c = ne.line("No. of shares at the end of the year", lambda i, c: f"=SUM({c}{sh_b}:{c}{sh_i})", bold=True, fmt=ACC0, bd=bTot, cols="DEF")
+    sh_b = ne.line("No. of shares at the beginning of the year", lambda i, c: f"={PCOLS[i]}{sc_tot}*{SCALE}/{md['fv']}", fmt=ACC0, cols=COLS)
+    sh_i = ne.line("Add: Shares issued during the year", lambda i, c: f"={c}{sc_tot}*{SCALE}/{md['fv']}-{c}{sh_b}", fmt=ACC0, cols=COLS)
+    sh_c = ne.line("No. of shares at the end of the year", lambda i, c: f"=SUM({c}{sh_b}:{c}{sh_i})", bold=True, fmt=ACC0, bd=bTot, cols=COLS)
     wsE[f"C{desc_row}"].value = '="("&TEXT(D' + str(sh_c) + ',"#,##0")&" Equity shares of Rs. "&' + md['fv'] + '&"/- each fully paid up)"'
     NR["__shares"] = (NE, sh_c)
     ne.gap()
     ne.line("(b) Details of shareholding of promoters", bold=True)
     r = ne.r
     w(wsE, f"C{r}", "Name of promoter", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsE, f"{'DEF'[i]}{r}", dtxt(k, "No. of shares as at\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsE, f"{COLS[i]}{r}", dtxt(k, "No. of shares as at\n"), fB, bd=bTB, al=wrapc)
     wsE.row_dimensions[r].height = 30
     ne.r += 1
     for k, nm in [(j, h["name"]) for j, h in enumerate(SH) if h.get("promoter")]:
-        rr = ne.line(f"{k+1}. {nm}", lambda i, c, k=k: f"={q(SR)}!{'CDE'[i]}{5+k}", fmt=ACC0, cols="DEF")
-        ne.line("   % of total shares", lambda i, c, rr=rr: f"=IFERROR({c}{rr}/{c}{sh_c},0)", fmt=PCT, italic=True, cols="DEF")
-        ne.line("   % change during the year", lambda i, c, rr=rr: (f"={c}{rr+1}-{'EF'[i]}{rr+1}" if i < 2 else "=0"), fmt=PCT, italic=True, cols="DEF")
+        rr = ne.line(f"{k+1}. {nm}", lambda i, c, k=k: f"={q(SR)}!{CL(3 + i)}{5+k}", fmt=ACC0, cols=COLS)
+        ne.line("   % of total shares", lambda i, c, rr=rr: f"=IFERROR({c}{rr}/{c}{sh_c},0)", fmt=PCT, italic=True, cols=COLS)
+        ne.line("   % change during the year", lambda i, c, rr=rr: (f"={c}{rr+1}-{PCOLS[i]}{rr+1}" if i < N - 1 else "=0"), fmt=PCT, italic=True, cols=COLS)
     ne.gap()
     ne.line("(c) Details of shareholders holding more than 5% of shares", bold=True)
     for k, nm in [(j, h["name"]) for j, h in enumerate(SH) if j in BIG]:
-        rr = ne.line(f"{k+1}. {nm} (No. of shares)", lambda i, c, k=k: f"={q(SR)}!{'CDE'[i]}{5+k}", fmt=ACC0, cols="DEF")
-        ne.line("   % holding", lambda i, c, rr=rr: f"=IFERROR({c}{rr}/{c}{sh_c},0)", fmt=PCT, italic=True, cols="DEF")
+        rr = ne.line(f"{k+1}. {nm} (No. of shares)", lambda i, c, k=k: f"={q(SR)}!{CL(3 + i)}{5+k}", fmt=ACC0, cols=COLS)
+        ne.line("   % holding", lambda i, c, rr=rr: f"=IFERROR({c}{rr}/{c}{sh_c},0)", fmt=PCT, italic=True, cols=COLS)
     ne.text("As per records of the Company, including its register of shareholders / members. There are no shares reserved for issue under options, no bonus shares, no shares "
             "allotted for consideration other than cash and no shares bought back during the five years immediately preceding the latest balance sheet date.", 2)
     ne.gap()
     ne.title("RS", "Reserves and surplus")
     ne.line("Surplus in the Statement of Profit and Loss", bold=True)
     RSR = {}
-    o = ne.line("Opening balance", lambda i, c: (f"={'EFG'[i]}{ne.r + 4}" if i < 3 else None))
-    p_ = ne.line("Add: Profit for the year", lambda i, c: (f"={PL}!{c}{{PAT}}" if i < 3 else None))
+    o = ne.line("Opening balance", lambda i, c: (f"={PCOLS[i]}{ne.r + 4}" if i < N else None))
+    p_ = ne.line("Add: Profit for the year", lambda i, c: (f"={PL}!{c}{{PAT}}" if i < N else None))
     RSR["profit"] = p_
 
 
@@ -524,7 +790,7 @@ def build(cfg, data, src, out_path, overrides=None):
         return f"={cur}-{prev}-{tbf(fy, chr(34) + 'Net profit as per books' + chr(34))}"
 
 
-    q1 = ne.line("Add / (Less): Adjustments made directly in reserves in the books", lambda i, c: book_other(i, c) if i < 3 else None)
+    q1 = ne.line("Add / (Less): Adjustments made directly in reserves in the books", lambda i, c: book_other(i, c) if i < N else None)
 
 
     def direct_adj(i, c):
@@ -533,16 +799,16 @@ def build(cfg, data, src, out_path, overrides=None):
         return f"=SUMIFS({AR('F')},{crit})-SUMIFS({AR('E')},{crit})"
 
 
-    q2 = ne.line("Add / (Less): Restatement adjustments (Refer Annexure V)", lambda i, c: direct_adj(i, c) if i < 3 else None)
-    cl = ne.line("Balance at the end of the year", lambda i, c: (f"=SUM({c}{o}:{c}{q2})" if i < 3 else
+    q2 = ne.line("Add / (Less): Restatement adjustments (Refer Annexure V)", lambda i, c: direct_adj(i, c) if i < N else None)
+    cl = ne.line("Balance at the end of the year", lambda i, c: (f"=SUM({c}{o}:{c}{q2})" if i < N else
                                                                  "=" + tb_open('"Reserves and surplus"') + "+(" + nz(adj_rs('"Reserves and surplus"', "d23")) + ")"),
                  bold=True, bd=bTot)
     NTOT["RS"] = (NE, cl)
     RSR.update({"open": o, "book": q1, "direct": q2, "close": cl})
-    bk = ne.line("Balance as per books of account", lambda i, c: "=" + (tbf(FYL[i], '"Reserves and surplus"') if i < 3 else tb_open('"Reserves and surplus"')), italic=True)
+    bk = ne.line("Balance as per books of account", lambda i, c: "=" + (tbf(FYL[i], '"Reserves and surplus"') if i < N else tb_open('"Reserves and surplus"')), italic=True)
     RSR["bookbal"] = bk
-    for i, c in enumerate("DEF"):
-        w(wsE, f"{'IJK'[i]}{cl}", f"=ROUND({c}{cl}-{c}{bk}-({nz(adj_rs(chr(34)+'Reserves and surplus'+chr(34), END[FYL[i]]))}),2)", fS, ACC)
+    for i, c in enumerate(COLS):
+        w(wsE, f"{CHK[i]}{cl}", f"=ROUND({c}{cl}-{c}{bk}-({nz(adj_rs(chr(34)+'Reserves and surplus'+chr(34), END[FYL[i]]))}),2)", fS, ACC)
     ne.text("Note: Adjustments made directly in reserves in the books represent entries passed directly to Reserves and surplus. Restatement adjustments are explained in Annexure V.", 2)
     NOTE_REF.update({"NOTE_SC": ne.no["SC"], "NOTE_RS": ne.no["RS"]})
 
@@ -564,15 +830,15 @@ def build(cfg, data, src, out_path, overrides=None):
     for kind, col_, lbl in [("acc", "D", "Loans accepted"), ("rep", "C", "Loans repaid")]:
         r = nl.r
         w(wsL, f"C{r}", lbl, fBI, bd=bTB)
-        for i, k in enumerate(["d26", "d25", "d24"]):
-            w(wsL, f"{'DEF'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+        for i, k in enumerate(DKL):
+            w(wsL, f"{COLS[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
         wsL.row_dimensions[r].height = 30
         nl.r += 1
         for d_ in DIRS:
             r = nl.r
             w(wsL, f"C{r}", d_)
             for i, fy in enumerate(FYL):
-                w(wsL, f"{'DEF'[i]}{r}", "=" + tbf(fy, f"$C{r}", col_) + f"/{SCALE}", fmt=ACC)
+                w(wsL, f"{COLS[i]}{r}", "=" + tbf(fy, f"$C{r}", col_) + f"/{SCALE}", fmt=ACC)
             DIRMOV[(kind, d_)] = r
             nl.r += 1
     nl.gap()
@@ -590,7 +856,8 @@ def build(cfg, data, src, out_path, overrides=None):
     a = nl.tb("Overdraft facilities from banks (secured)", "Cr")
     b_ = nl.tb("Bill discounting and channel finance (secured)", "Cr")
     nl.total(a, b_, "STB")
-    nl.text("Overdraft facilities are secured by hypothecation of current assets, lien on fixed deposits and personal guarantee of the directors. [Sanction terms to be updated]", 1)
+    nl.text("Rate of interest, repayment terms, security and guarantees of each facility are given in 'Borrowing Terms'." if RST.get("borrowings") else
+            "Overdraft facilities are secured by hypothecation of current assets, lien on fixed deposits and personal guarantee of the directors. [Sanction terms to be updated]", 1)
     nl.gap()
     nl.title("TP", "Trade payables")
     a = nl.tb("Dues to micro and small enterprises", "Cr")
@@ -600,14 +867,14 @@ def build(cfg, data, src, out_path, overrides=None):
     nl.gap()
     nl.line("Disclosure under Micro, Small and Medium Enterprises Development Act, 2006", bold=True)
     MSME_ROWS = nl.r
-    nl.line("(a) Principal amount remaining unpaid to suppliers at the end of the year", lambda i, c: f"={c}{a}", cols="DEF")
+    nl.line("(a) Principal amount remaining unpaid to suppliers at the end of the year", lambda i, c: f"={c}{a}", cols=COLS)
     msme_b = nl.line("(b) Interest due thereon remaining unpaid at the end of the year", None)
     msme_c = nl.line("(c) Interest paid / payable for delayed payments during the year", None)
-    nl.line("(d) Amount of further interest remaining due and payable in succeeding years", 0, cols="DEF")
+    nl.line("(d) Amount of further interest remaining due and payable in succeeding years", 0, cols=COLS)
     nl.text("The above information has been determined to the extent such parties have been identified on the basis of information available with the Company.", 1)
     nl.gap()
     AGE_TP = []
-    for k, (dk, base) in enumerate([("d26", 5), ("d25", 13), ("d24", 21)]):
+    for k, (dk, base) in enumerate([(dk_, 5 + 8 * j) for j, dk_ in enumerate(DKL)]):
         r = nl.r
         w(wsL, f"C{r}", dtxt(dk, "Trade payables ageing schedule as at "), fB); nl.r += 1
         r = nl.r
@@ -625,7 +892,7 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsL, f"C{r}", "Total", fB, bd=bTot)
         for i in range(4):
             w(wsL, f"{'DEFG'[i]}{r}", f"=SUM({'DEFG'[i]}{first}:{'DEFG'[i]}{r-1})", fB, ACC, bd=bTot)
-        w(wsL, f"I{r}", f"=ROUND(SUM(D{r}:G{r})-{'DEF'[k]}{NTOT['TP'][1]},2)", fS, ACC)
+        w(wsL, f"{CHK[0]}{r}", f"=ROUND(SUM(D{r}:G{r})-{COLS[k]}{NTOT['TP'][1]},2)", fS, ACC)
         nl.r += 2
     nl.title("OCL", "Other current liabilities")
     first = nl.r
@@ -633,7 +900,7 @@ def build(cfg, data, src, out_path, overrides=None):
                 "Credit card dues", "Interest accrued on dues to MSME", "Advance from customers"]:
         nl.tb(lbl, "Cr")
     nl.total(first, nl.r - 1, "OCL")
-    for i, c in enumerate("DEF"):
+    for i, c in enumerate(COLS):
         w(wsL, f"{c}{msme_b}", f"={c}{NR['Interest accrued on dues to MSME'][1]}", fmt=ACC)
     nl.gap()
     nl.title("STP", "Short-term provisions")
@@ -650,8 +917,8 @@ def build(cfg, data, src, out_path, overrides=None):
     r += 2
     # summary (feeds BS_1)
     w(wsPP, f"C{r}", "Net carrying amount", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24", "d23"]):
-        w(wsPP, f"{'DEFG'[i]}{r}", dtxt(k), fB if i < 3 else fG, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL + ["d23"]):
+        w(wsPP, f"{(COLS + OCOL)[i]}{r}", dtxt(k), fB if i < N else fG, bd=bTB, al=wrapc)
     wsPP.row_dimensions[r].height = 30
     r += 1
     SUMROW = {}
@@ -660,7 +927,7 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsPP, f"C{r}", nm)
         r += 1
     w(wsPP, f"C{r}", "Total", fB, bd=bTot)
-    for col in "DEFG": w(wsPP, f"{col}{r}", f"=SUM({col}{r-4}:{col}{r-1})", fB, ACC, bd=bTot)
+    for col in COLS + OCOL: w(wsPP, f"{col}{r}", f"=SUM({col}{r-4}:{col}{r-1})", fB, ACC, bd=bTot)
     r += 2
     w(wsPP, f"C{r}", "The Company maintains its fixed assets on written down value basis in its books. The movement in the net carrying amount is given below.", fI)
     r += 2
@@ -673,8 +940,8 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsPP, f"C{r}", dtxt(yk, "As at "), fB); r += 1
         w(wsPP, f"C{r}", "Particulars", fB, bd=bTB)
         w(wsPP, f"D{r}", f'="As at "&TEXT({md[pk]}+1,"mmmm dd, yyyy")', fB, bd=bTB, al=wrapc)
-        w(wsPP, f"E{r}", "Additions during the year", fB, bd=bTB, al=wrapc)
-        w(wsPP, f"F{r}", "Depreciation / deductions during the year", fB, bd=bTB, al=wrapc)
+        w(wsPP, f"E{r}", "Additions during the " + ("period" if fy == "FYS" else "year"), fB, bd=bTB, al=wrapc)
+        w(wsPP, f"F{r}", "Depreciation / deductions during the " + ("period" if fy == "FYS" else "year"), fB, bd=bTB, al=wrapc)
         w(wsPP, f"G{r}", dtxt(yk), fB, bd=bTB, al=wrapc)
         wsPP.row_dimensions[r].height = 30
         r += 1
@@ -684,9 +951,10 @@ def build(cfg, data, src, out_path, overrides=None):
             first = r
             for lbl in labels:
                 w(wsPP, f"C{r}", lbl)
-                w(wsPP, f"D{r}", "=" + (tbf(PREVFY[fy], f"$C{r}") if fy in PREVFY else tb_open(f"$C{r}")), fmt=ACC)
+                w(wsPP, f"D{r}", "=" + (tbf(PREVFY[fy], f"$C{r}") if fy in PREVFY else tb_open(f"$C{r}"))
+                  + "+(" + nz(adj_bs(f"$C{r}", START[fy], "Dr")) + ")", fmt=ACC)
                 w(wsPP, f"E{r}", "=" + tbf(fy, f"$C{r}", "C") + f"/{SCALE}", fmt=ACC)
-                w(wsPP, f"G{r}", "=" + tbf(fy, f"$C{r}"), fmt=ACC)
+                w(wsPP, f"G{r}", "=" + tbf(fy, f"$C{r}") + "+(" + nz(adj_bs(f"$C{r}", END[fy], "Dr")) + ")", fmt=ACC)
                 w(wsPP, f"F{r}", f"=D{r}+E{r}-G{r}", fmt=ACC)
                 NR.setdefault(lbl, (NP, r))
                 r += 1
@@ -706,8 +974,8 @@ def build(cfg, data, src, out_path, overrides=None):
     for k, nm in enumerate(names4):
         rr = SUMROW[nm]
         for i, fy in enumerate(FYL):
-            w(wsPP, f"{'DEF'[i]}{rr}", f"=G{PPE_TAB[fy][0][k][1]}", fmt=ACC)
-        w(wsPP, f"G{rr}", f"=D{PPE_TAB['FY24'][0][k][1]}", fG, ACC)
+            w(wsPP, f"{COLS[i]}{rr}", f"=G{PPE_TAB[fy][0][k][1]}", fmt=ACC)
+        w(wsPP, f"{OCOL}{rr}", f"=D{PPE_TAB['FY24'][0][k][1]}", fG, ACC)
         NTOT[nm] = (NP, rr)
 
     # ---------------- Notes_Assets
@@ -720,10 +988,11 @@ def build(cfg, data, src, out_path, overrides=None):
     net_ = na.line("Net deferred tax asset / (liability)", lambda i, c: f"={c}{a}-{c}{b_}", bold=True, bd=bTot)
     na.gap()
     na.line("Movement during the year", bold=True)
-    mo = na.line("Opening balance", lambda i, c: f"={'EFG'[i]}{net_}", cols="DEF")
+    mo = na.line("Opening balance", lambda i, c: f"={PCOLS[i]}{net_}", cols=COLS)
     mc = na.line("Add: Credit / (charge) to the Statement of Profit and Loss", None)
-    mcl = na.line("Closing balance", lambda i, c: f"={c}{mo}+{c}{mc}", bold=True, bd=bT, cols="DEF")
-    for i, c in enumerate("DEF"): w(wsNA, f"{'IJK'[i]}{mcl}", f"=ROUND({c}{mcl}-{c}{net_},2)", fS, ACC)
+    mdr = na.line("Add / (Less): Recognised directly in reserves (restatement)", None)
+    mcl = na.line("Closing balance", lambda i, c: f"={c}{mo}+{c}{mc}+{c}{mdr}", bold=True, bd=bT, cols=COLS)
+    for i, c in enumerate(COLS): w(wsNA, f"{CHK[i]}{mcl}", f"=ROUND({c}{mcl}-{c}{net_},2)", fS, ACC)
     na.text("Deferred tax arises mainly on account of difference between depreciation as per books and as per the Income-tax Act, and expenses allowable on payment basis (gratuity).", 2)
     na.gap()
     na.title("LTLA", "Long-term loans and advances")
@@ -735,21 +1004,25 @@ def build(cfg, data, src, out_path, overrides=None):
     na.line("(Valued at lower of cost and net realisable value, as taken, valued and certified by the management)", italic=True)
     r = na.r
     w(wsNA, f"C{r}", "Stock-in-trade")
-    w(wsNA, f"D{r}", f"={md['clstk']}/{SCALE}", fmt=ACC)
-    w(wsNA, f"E{r}", "=" + tbf("FY26", '"Opening stock"'), fmt=ACC)
-    w(wsNA, f"F{r}", "=" + tbf("FY25", '"Opening stock"'), fmt=ACC)
-    w(wsNA, f"G{r}", "=" + tbf("FY24", '"Opening stock"'), fG, ACC)
+    for i, fy in enumerate(PK):     # closing stock: inputs for the stub / latest year, else the next period's opening stock in Tally
+        f_ = f"={md['clstkS']}/{SCALE}" if fy == "FYS" else (f"={md['clstk']}/{SCALE}" if fy == "FY26" else "=" + tbf(PK[i - 1], '"Opening stock"'))
+        w(wsNA, f"{COLS[i]}{r}", f_, fmt=ACC)
+    w(wsNA, f"{OCOL}{r}", "=" + tbf("FY24", '"Opening stock"'), fG, ACC)
+    if STUB:     # the stub TB's opening stock must equal the closing stock input for the latest year end
+        w(wsNA, f"{CHK[1]}{r}", f"=ROUND({tbf('FYS', chr(34) + 'Opening stock' + chr(34))}-{COLS[1]}{r},2)", fS, ACC)
+        w(wsNA, f"{CHK[2]}{r}", "<- opening stock in stub TB less closing stock input (should be nil)", fG)
     NR["Stock-in-trade"] = (NA, r)
     na.r += 1
     na.total(r, r, "INV")
-    na.text("Closing stock as at the latest balance sheet date is as per the audited financial statements; closing stock of earlier years is the opening stock carried in the next year's books.", 1)
+    na.text("Closing stock as at the latest balance sheet date" + (" and the stub period end" if STUB else "") + " is as per the financial statements / management certificate; "
+            "closing stock of earlier years is the opening stock carried in the next year's books.", 1)
     na.gap()
     na.title("TR", "Trade receivables")
     na.line("Unsecured, considered good", bold=True)
     a = na.tb("Trade receivables", "Dr")
     na.total(a, a, "TR")
     na.gap()
-    for k, (dk, base) in enumerate([("d26", 5), ("d25", 13), ("d24", 21)]):
+    for k, (dk, base) in enumerate([(dk_, 5 + 8 * j) for j, dk_ in enumerate(DKL)]):
         r = na.r
         w(wsNA, f"C{r}", dtxt(dk, "Trade receivables ageing schedule as at "), fB); na.r += 1
         r = na.r
@@ -770,7 +1043,7 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsNA, f"C{r}", "Total", fB, bd=bTot)
         for i in range(5):
             w(wsNA, f"{'DEFGH'[i]}{r}", f"=SUM({'DEFGH'[i]}{first}:{'DEFGH'[i]}{r-1})", fB, ACC, bd=bTot)
-        w(wsNA, f"I{r}", f"=ROUND(SUM(D{r}:H{r})-{'DEF'[k]}{NTOT['TR'][1]},2)", fS, ACC)
+        w(wsNA, f"{CHK[0] if N > 3 else 'I'}{r}", f"=ROUND(SUM(D{r}:H{r})-{COLS[k]}{NTOT['TR'][1]},2)", fS, ACC)
         na.r += 2
     na.title("CB", "Cash and bank balances")
     na.line("Cash and cash equivalents", bold=True)
@@ -823,8 +1096,8 @@ def build(cfg, data, src, out_path, overrides=None):
     nP.total(a, b_, "PUR")
     nP.gap()
     nP.title("CHG", "Changes in inventories of stock-in-trade", pl=True)
-    a = nP.line("Inventories at the beginning of the year (a)", lambda i, c: "=" + nref("Stock-in-trade", "EFG"[i]))
-    b_ = nP.line("Inventories at the end of the year (b)", lambda i, c: "=" + nref("Stock-in-trade", "DEF"[i]))
+    a = nP.line("Inventories at the beginning of the year (a)", lambda i, c: "=" + nref("Stock-in-trade", PCOLS[i]))
+    b_ = nP.line("Inventories at the end of the year (b)", lambda i, c: "=" + nref("Stock-in-trade", COLS[i]))
     r = nP.line("(Increase) / decrease in inventories (a - b)", lambda i, c: f"={c}{a}-{c}{b_}", bold=True, bd=bTot)
     NTOT["CHG"] = (NPL, r)
     nP.gap()
@@ -839,7 +1112,7 @@ def build(cfg, data, src, out_path, overrides=None):
     first = nP.r
     for lbl in ["Interest on borrowings", "Interest on delayed payments to MSME", "Other borrowing costs"]: nP.tb(lbl, "Dr")
     nP.total(first, nP.r - 1, "FIN")
-    for i, c in enumerate("DEF"):
+    for i, c in enumerate(COLS):
         w(wsL, f"{c}{msme_c}", "=" + nref("Interest on delayed payments to MSME", c), fmt=ACC)
     nP.gap()
     nP.title("DEP", "Depreciation and amortisation expense", pl=True)
@@ -869,22 +1142,24 @@ def build(cfg, data, src, out_path, overrides=None):
     nP.title("EPS", "Earnings per share", pl=True)
     EPS_START = nP.r
     NOTE_REF.update({"NOTE_" + k: nP.no[k] for k in ["REV", "OI", "PUR", "CHG", "EMP", "FIN", "DEP", "OE", "TAX", "EPS"]})
-    for i, c in enumerate("DEF"):
+    for i, c in enumerate(COLS):
         w(wsNA, f"{c}{mc}", f"=-{nref('Deferred tax', c)}", fmt=ACC)
+        # deferred tax restatement routed directly through reserves (e.g. on opening adjustments)
+        w(wsNA, f"{c}{mdr}", f"=({c}{net_}-{PCOLS[i]}{net_})-{c}{mc}", fmt=ACC)
     for fy in FYL:
         for row in wsPP.iter_rows(min_col=6, max_col=6):
             for c in row:
                 if c.value == "DEPLINK" + fy:
-                    c.value = "=" + tref("DEP", "DEF"[FYL.index(fy)])
+                    c.value = "=" + tref("DEP", COLS[FYL.index(fy)])
 
     # ================================================================== BS_1 (totals linked from notes)
-    wsB = sheet(BS, {"A": 1, "B": 52, "C": 11, "D": 16.8, "E": 16.8, "F": 16.8, "G": 3, "H": 15})
-    head(wsB, "ANNEXURE I - RESTATED SUMMARY STATEMENT OF ASSETS AND LIABILITIES")
+    wsB = sheet(BS, {"A": 1, "B": 52, "C": 11, **{c: 16.8 for c in COLS}, CL(4 + N): 3, BSO: 15})
+    head(wsB, "ANNEXURE I - RESTATED SUMMARY STATEMENT OF ASSETS AND LIABILITIES", span=LASTC)
     w(wsB, "B8", "Particulars", fB, bd=bTB, al=Alignment(vertical="center"))
     w(wsB, "C8", "Annexure VI Notes", fB, bd=bTB, al=wrapc)
-    for col, k in zip("DEF", ["d26", "d25", "d24"]):
+    for col, k in zip(COLS, DKL):
         w(wsB, f"{col}8", dtxt(k), fB, bd=bTB, al=wrapc)
-    w(wsB, "H8", dtxt("d23"), fG, bd=bTB, al=wrapc)
+    w(wsB, f"{BSO}8", dtxt("d23"), fG, bd=bTB, al=wrapc)
     wsB.row_dimensions[8].height = 30
     FACE = {}
     r = 9
@@ -895,8 +1170,8 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsB, f"B{r}", ("   " * indent) + label, fB if bold else fN)
         if note: w(wsB, f"C{r}", "=" + NOTE_REF[note], al=Alignment(horizontal="center"))
         if key:
-            for col, nc in zip("DEFH", "DEFG"):
-                w(wsB, f"{col}{r}", "=" + tref(key, nc), fG if col == "H" else fN, ACC)
+            for col, nc in zip(COLS + BSO, COLS + OCOL):
+                w(wsB, f"{col}{r}", "=" + tref(key, nc), fG if col == BSO else fN, ACC)
             FACE[key] = r
         r += 1
         return r - 1
@@ -905,9 +1180,9 @@ def build(cfg, data, src, out_path, overrides=None):
     def tot(label, rows_, key, dbl_=False):
         nonlocal r
         w(wsB, f"B{r}", label, fB)
-        for col in "DEFH":
+        for col in COLS + BSO:
             w(wsB, f"{col}{r}", "=SUM(" + ",".join(f"{col}{x}" for x in rows_) + ")" if len(rows_) > 2 else "=" + "+".join(f"{col}{x}" for x in rows_),
-              fG if col == "H" else fB, ACC, bd=bTot if dbl_ else bT)
+              fG if col == BSO else fB, ACC, bd=bTot if dbl_ else bT)
         FACE[key] = r
         r += 1
         return r - 1
@@ -951,22 +1226,22 @@ def build(cfg, data, src, out_path, overrides=None):
     b5 = face("Other current assets", "OCA", note="NOTE_OCA")
     f2 = tot("Total Current assets", [b1, b2, b3, b4, b5], "CA"); r += 1
     TA = tot("Total Assets", [f1, f2], "TA", True)
-    for col in "DEFH":
+    for col in COLS + BSO:
         w(wsB, f"{col}1", f"=ROUND({col}{TL}-{col}{TA},2)", fS, ACC)
     r += 1
     NOTE_TEXT_ROW = r
     w(wsB, f"B{r}", "The above statement should be read with Annexure IV - Background, basis of preparation and significant accounting policies, Annexure V - "
                     "Statement of adjustments to audited financial statements and Annexure VI - Notes to the restated summary statements.", fN, al=just)
-    wsB.merge_cells(f"B{r}:F{r+1}"); r += 3
-    sign_block(wsB, r)
+    wsB.merge_cells(f"B{r}:{LASTC}{r+1}"); r += 3
+    sign_block(wsB, r, cF=LASTC)
 
     # ================================================================== PL_2 (totals linked from notes)
-    wsP = sheet(PL, {"A": 1, "B": 60, "C": 11, "D": 16.8, "E": 16.8, "F": 16.8})
-    head(wsP, "ANNEXURE II - RESTATED SUMMARY STATEMENT OF PROFIT AND LOSS")
+    wsP = sheet(PL, {"A": 1, "B": 60, "C": 11, **{c: 16.8 for c in COLS}})
+    head(wsP, "ANNEXURE II - RESTATED SUMMARY STATEMENT OF PROFIT AND LOSS", span=LASTC)
     w(wsP, "B7", "Particulars", fB, bd=bTB, al=Alignment(vertical="center"))
     w(wsP, "C7", "Annexure VI Notes", fB, bd=bTB, al=wrapc)
-    for col, k in zip("DEF", ["d26", "d25", "d24"]):
-        w(wsP, f"{col}7", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for col, k in zip(COLS, DKL):
+        w(wsP, f"{col}7", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsP.row_dimensions[7].height = 30
     PF = {}
     r = 8
@@ -976,7 +1251,7 @@ def build(cfg, data, src, out_path, overrides=None):
         nonlocal r
         w(wsP, f"B{r}", label, fB if bold else fN, bd=bd)
         if note: w(wsP, f"C{r}", "=" + NOTE_REF[note], al=Alignment(horizontal="center"))
-        for col in "DEF":
+        for col in COLS:
             v = ("=" + ref(col)) if ref else (formula(col) if formula else None)
             if v is not None: w(wsP, f"{col}{r}", v, fB if bold else fN, fmt, bd=bd)
         if key: PF[key] = r
@@ -1003,15 +1278,17 @@ def build(cfg, data, src, out_path, overrides=None):
     t1 = pface("Current tax", lambda c: nref("Current tax", c), "NOTE_TAX", key="TAXC")
     t2 = pface("Deferred tax", lambda c: nref("Deferred tax", c), key="TAXD")
     t3 = pface("Total tax expense", formula=lambda c: f"=SUM({c}{t1}:{c}{t2})", bd=bT, key="TAX")
-    pat = pface("IX. Profit for the year (VII - VIII)", formula=lambda c: f"={c}{pbt}-{c}{t3}", bold=True, bd=bTot, key="PAT")
+    pat = pface("IX. Profit for the " + ("period / year" if STUB else "year") + " (VII - VIII)", formula=lambda c: f"={c}{pbt}-{c}{t3}", bold=True, bd=bTot, key="PAT")
     r += 1
     pface("X. Earnings per equity share (Face value of Rs. 10 each)", bold=True)
     eps_r = pface("Basic and Diluted (in Rs.)", note="NOTE_EPS", key="EPS")
     r += 1
-    w(wsP, f"B{r}", f"={BS}!B{NOTE_TEXT_ROW}", fN, al=just); wsP.merge_cells(f"B{r}:F{r+1}"); r += 3
-    sign_block(wsP, r)
+    w(wsP, f"B{r}", f"={BS}!B{NOTE_TEXT_ROW}", fN, al=just); wsP.merge_cells(f"B{r}:{LASTC}{r+1}"); r += 3
+    if STUB:
+        w(wsP, f"B{r - 1}", f'="Note: Figures for the period ended "&TEXT({md["dS"]},"mmmm dd, yyyy")&" are not annualised."', fI)
+    sign_block(wsP, r, cF=LASTC)
     # check: restated PAT = PAT as per books + restatement adjustments
-    for i, c in enumerate("DEF"):
+    for i, c in enumerate(COLS):
         fy = FYL[i]
         crit = f'{AR("D")},"P&L",{AR("A")},">"&{md[START[fy]]},{AR("A")},"<="&{md[END[fy]]}'
         w(wsP, f"{c}1", f"=ROUND({c}{pat}-{nref('__bookpat', c)}+(SUMIFS({AR('E')},{crit})-SUMIFS({AR('F')},{crit})),2)", fS, ACC)
@@ -1023,14 +1300,15 @@ def build(cfg, data, src, out_path, overrides=None):
                     c.value = c.value.replace("{PAT}", str(pat)).replace("{PBT}", str(pbt))
 
     # ================================================================== CFS_3 (from BS_1, PL_2 and notes)
-    wsC = sheet(CF, {"A": 1, "B": 62, "C": 18, "D": 18, "E": 18})
-    head(wsC, "ANNEXURE III - RESTATED SUMMARY STATEMENT OF CASH FLOWS", span="E")
+    CFC = "".join(CL(3 + i) for i in range(N))      # cash flow columns C, D, E[, F]
+    wsC = sheet(CF, {"A": 1, "B": 62, **{c: 18 for c in CFC}})
+    head(wsC, "ANNEXURE III - RESTATED SUMMARY STATEMENT OF CASH FLOWS", span=CFC[-1])
     w(wsC, "B8", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsC, f"{'CDE'[i]}8", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsC, f"{CFC[i]}8", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsC.row_dimensions[8].height = 30
-    CUR, PRV = "DEF", "EFH"
-    NCUR, NPRV = "DEF", "EFG"
+    CUR, PRV = COLS, BPRV
+    NCUR, NPRV = COLS, PCOLS
     r = 9
 
 
@@ -1038,14 +1316,14 @@ def build(cfg, data, src, out_path, overrides=None):
         nonlocal r
         w(wsC, f"B{r}", label, fB if bold else fN, bd=bd)
         if fn:
-            for i, col in enumerate("CDE"):
+            for i, col in enumerate(CFC):
                 w(wsC, f"{col}{r}", fn(i, CUR[i], PRV[i]), fB if bold else fN, ACC, bd=bd)
         r += 1
         return r - 1
 
 
     def Bf(key, c): return f"{BS}!{c}{FACE[key]}"
-    def P(key, i): return f"{PL}!{'DEF'[i]}{PF[key]}"
+    def P(key, i): return f"{PL}!{COLS[i]}{PF[key]}"
     def Nn(lbl, i, prev=False): return nref(lbl, (NPRV if prev else NCUR)[i])
 
 
@@ -1056,7 +1334,7 @@ def build(cfg, data, src, out_path, overrides=None):
     a2_ = cf("Finance costs", lambda i, c, p: "=" + P("FIN", i))
     a3_ = cf("Interest income", lambda i, c, p: "=-" + Nn("Interest income", i))
     a4_ = cf("Adjustments made directly in reserves", lambda i, c, p: f"={q(NE)}!{NCUR[i]}{RSR['book']}+{q(NE)}!{NCUR[i]}{RSR['direct']}")
-    a5_ = cf("Operating profit before working capital changes", lambda i, c, p: f"=SUM({'CDE'[i]}{a0}:{'CDE'[i]}{a4_})", bold=True, bd=bT)
+    a5_ = cf("Operating profit before working capital changes", lambda i, c, p: f"=SUM({CFC[i]}{a0}:{CFC[i]}{a4_})", bold=True, bd=bT)
     cf("Adjustments for changes in working capital:")
     cf("(Increase) / decrease in inventories", lambda i, c, p: f"={Bf('INV', p)}-{Bf('INV', c)}")
     cf("(Increase) / decrease in trade receivables", lambda i, c, p: f"={Bf('TR', p)}-{Bf('TR', c)}")
@@ -1069,11 +1347,11 @@ def build(cfg, data, src, out_path, overrides=None):
     cf("Increase / (decrease) in other current liabilities", lambda i, c, p: f"={Bf('OCL', c)}-{Bf('OCL', p)}")
     w8 = cf("Increase / (decrease) in long-term provisions and other long-term liabilities",
             lambda i, c, p: f"=({Bf('LTP', c)}+{Bf('OLTL', c)})-({Bf('LTP', p)}+{Bf('OLTL', p)})")
-    w9 = cf("Cash generated from operations", lambda i, c, p: f"=SUM({'CDE'[i]}{a5_}:{'CDE'[i]}{w8})", bold=True, bd=bT)
+    w9 = cf("Cash generated from operations", lambda i, c, p: f"=SUM({CFC[i]}{a5_}:{CFC[i]}{w8})", bold=True, bd=bT)
     w10 = cf("Income taxes paid (net of refunds)",
              lambda i, c, p: f"=-{P('TAX', i)}+({Bf('STP', c)}-{Bf('STP', p)})-({Nn('Advance tax, TDS and TCS receivable', i)}-{Nn('Advance tax, TDS and TCS receivable', i, True)})"
                              f"-({Bf('DTA', c)}-{Bf('DTA', p)})+({Bf('DTL', c)}-{Bf('DTL', p)})")
-    A_ = cf("Net cash flow from / (used in) operating activities (A)", lambda i, c, p: f"={'CDE'[i]}{w9}+{'CDE'[i]}{w10}", bold=True, bd=bTot)
+    A_ = cf("Net cash flow from / (used in) operating activities (A)", lambda i, c, p: f"={CFC[i]}{w9}+{CFC[i]}{w10}", bold=True, bd=bTot)
     r += 1
     cf("B) Cash flows from investing activities", bold=True)
     fa = names4
@@ -1081,47 +1359,47 @@ def build(cfg, data, src, out_path, overrides=None):
              lambda i, c, p: "=-((" + "+".join(Bf(x, c) for x in fa) + ")-(" + "+".join(Bf(x, p) for x in fa) + f")+{P('DEP', i)})")
     cf("(Investment in) / redemption of fixed deposits with banks", lambda i, c, p: f"={Nn('Fixed deposits with banks', i, True)}-{Nn('Fixed deposits with banks', i)}")
     i3_ = cf("Interest received", lambda i, c, p: f"={Nn('Interest income', i)}-({Nn('Interest accrued on deposits', i)}-{Nn('Interest accrued on deposits', i, True)})")
-    B_ = cf("Net cash flow from / (used in) investing activities (B)", lambda i, c, p: f"=SUM({'CDE'[i]}{i1_}:{'CDE'[i]}{i3_})", bold=True, bd=bTot)
+    B_ = cf("Net cash flow from / (used in) investing activities (B)", lambda i, c, p: f"=SUM({CFC[i]}{i1_}:{CFC[i]}{i3_})", bold=True, bd=bTot)
     r += 1
     cf("C) Cash flows from financing activities", bold=True)
     f1_ = cf("Proceeds from issue of share capital", lambda i, c, p: f"={Bf('SC', c)}-{Bf('SC', p)}")
     cf("Proceeds from / (repayment of) long-term borrowings (net)", lambda i, c, p: f"={Bf('LTB', c)}-{Bf('LTB', p)}")
     cf("Proceeds from / (repayment of) short-term borrowings (net)", lambda i, c, p: f"={Bf('STB', c)}-{Bf('STB', p)}")
     f4_ = cf("Finance costs paid", lambda i, c, p: f"=-{P('FIN', i)}")
-    C_ = cf("Net cash flow from / (used in) financing activities (C)", lambda i, c, p: f"=SUM({'CDE'[i]}{f1_}:{'CDE'[i]}{f4_})", bold=True, bd=bTot)
+    C_ = cf("Net cash flow from / (used in) financing activities (C)", lambda i, c, p: f"=SUM({CFC[i]}{f1_}:{CFC[i]}{f4_})", bold=True, bd=bTot)
     r += 1
-    nt = cf("Net increase / (decrease) in cash and cash equivalents (A+B+C)", lambda i, c, p: f"={'CDE'[i]}{A_}+{'CDE'[i]}{B_}+{'CDE'[i]}{C_}", bold=True)
+    nt = cf("Net increase / (decrease) in cash and cash equivalents (A+B+C)", lambda i, c, p: f"={CFC[i]}{A_}+{CFC[i]}{B_}+{CFC[i]}{C_}", bold=True)
     op = cf("Cash and cash equivalents at the beginning of the year", lambda i, c, p: "=" + tref("CCE", NPRV[i]))
-    clo = cf("Cash and cash equivalents at the end of the year", lambda i, c, p: f"={'CDE'[i]}{nt}+{'CDE'[i]}{op}", bold=True, bd=bTot)
+    clo = cf("Cash and cash equivalents at the end of the year", lambda i, c, p: f"={CFC[i]}{nt}+{CFC[i]}{op}", bold=True, bd=bTot)
     r += 1
     cf("Components of cash and cash equivalents:", bold=True)
     k1 = cf("Cash on hand", lambda i, c, p: "=" + Nn("Cash on hand", i))
     k2 = cf("Balances with banks in current accounts", lambda i, c, p: "=" + Nn("Balances with banks in current accounts", i))
-    k3 = cf("Total cash and cash equivalents", lambda i, c, p: f"=SUM({'CDE'[i]}{k1}:{'CDE'[i]}{k2})", bold=True, bd=bTot)
-    for i, col in enumerate("CDE"):
+    k3 = cf("Total cash and cash equivalents", lambda i, c, p: f"=SUM({CFC[i]}{k1}:{CFC[i]}{k2})", bold=True, bd=bTot)
+    for i, col in enumerate(CFC):
         w(wsC, f"{col}1", f"=ROUND({col}{k3}-{col}{clo},2)", fS, ACC)
     r += 1
     w(wsC, f"B{r}", "Note: The Cash Flow Statement has been prepared under the indirect method as set out in Accounting Standard 3 'Cash Flow Statements'. Bank overdrafts "
                     "are shown under short-term borrowings and their movement is included in financing activities.", al=just)
-    wsC.merge_cells(f"B{r}:E{r+1}"); r += 3
-    sign_block(wsC, r, "B", "C", "E")
+    wsC.merge_cells(f"B{r}:{CFC[-1]}{r+1}"); r += 3
+    sign_block(wsC, r, "B", "C", CFC[-1])
 
     # ================================================================== RPT (from notes)
-    wsT = sheet(RPT, {"A": 1, "B": 5, "C": 52, "D": 16.8, "E": 16.8, "F": 16.8})
+    wsT = sheet(RPT, {"A": 1, "B": 5, "C": 52, **{c: 16.8 for c in COLS}})
     head(wsT, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS")
     r = 8
     w(wsT, f"B{r}", f"={nP.no['EPS']}+1", fB); w(wsT, f"C{r}", "Related party transactions", fB)
     r += 2
     w(wsT, f"C{r}", "(a) List of related parties and nature of relationship", fB); r += 1
-    w(wsT, f"C{r}", "Name of the party", fB, bd=bTB); w(wsT, f"D{r}", "Nature of relationship", fB, bd=bTB); wsT.merge_cells(f"D{r}:F{r}"); r += 1
+    w(wsT, f"C{r}", "Name of the party", fB, bd=bTB); w(wsT, f"D{r}", "Nature of relationship", fB, bd=bTB); wsT.merge_cells(f"D{r}:{LASTC}{r}"); r += 1
     w(wsT, f"C{r}", "Key Managerial Personnel", fBI); r += 1
     for nm, rel in [(f"=PROPER({md['dir1']})", "Director and Promoter"), (f"=PROPER({md['dir2']})", "Director and Promoter"), (f"=PROPER({md['dir3']})", "Director")]:
         w(wsT, f"C{r}", nm); w(wsT, f"D{r}", rel); r += 1
     w(wsT, f"C{r}", "Relatives of KMP / entities in which KMP have significant influence", fBI); r += 1
     w(wsT, f"C{r}", "[To be furnished by the management]", fI); r += 2
     w(wsT, f"C{r}", "(b) Transactions with related parties during the year", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsT, f"{'DEF'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsT, f"{COLS[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsT.row_dimensions[r].height = 30
     r += 1
 
@@ -1130,7 +1408,7 @@ def build(cfg, data, src, out_path, overrides=None):
         nonlocal r
         w(wsT, f"C{r}", label, fB if bold else fN)
         if fn:
-            for i, col in enumerate("DEF"):
+            for i, col in enumerate(COLS):
                 w(wsT, f"{col}{r}", fn(i, col), fB if bold else fN, ACC)
         r += 1
 
@@ -1142,8 +1420,8 @@ def build(cfg, data, src, out_path, overrides=None):
         rp(f"Loan repaid - {nm}", lambda i, c, d_=d_: f"={q(NL)}!{c}{DIRMOV[('rep', d_)]}")
     r += 1
     w(wsT, f"C{r}", "(c) Outstanding balances at the end of the year", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsT, f"{'DEF'[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsT, f"{COLS[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
     wsT.row_dimensions[r].height = 30
     r += 1
     for d_ in DIRS:
@@ -1152,70 +1430,70 @@ def build(cfg, data, src, out_path, overrides=None):
     r += 1
     w(wsT, f"C{r}", "Note: Related party relationships are as identified by the management. Director-wise split of remuneration and other transactions (rent, reimbursements, "
                     "guarantees) are to be furnished by the management.", al=just)
-    wsT.merge_cells(f"C{r}:F{r+1}")
+    wsT.merge_cells(f"C{r}:{LASTC}{r+1}")
     RPT_NO = f"{q(RPT)}!$B$8"
 
     # ================================================================== Gratuity and contingencies
-    wsG = sheet(GC, {"A": 1, "B": 5, "C": 66, "D": 16.8, "E": 16.8, "F": 16.8})
+    wsG = sheet(GC, {"A": 1, "B": 5, "C": 66, **{c: 16.8 for c in COLS}})
     head(wsG, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS")
     r = 8
     w(wsG, f"B{r}", f"={RPT_NO}+1", fB); w(wsG, f"C{r}", "Contingent liabilities and commitments", fB)
     r += 2
     w(wsG, f"C{r}", "a) Contingent liabilities", fB); r += 1
     w(wsG, f"C{r}", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsG, f"{'DEF'[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsG, f"{COLS[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
     wsG.row_dimensions[r].height = 30
     r += 1
     first = r
     for lbl in ["(a) Claims against the Company not acknowledged as debt", "(b) Guarantees issued by banks on behalf of the Company", "(c) Other money for which the Company is contingently liable"]:
         w(wsG, f"C{r}", lbl)
-        for col in "DEF": w(wsG, f"{col}{r}", 0, fBlue, ACC)
+        for col in COLS: w(wsG, f"{col}{r}", 0, fBlue, ACC)
         r += 1
     w(wsG, f"C{r}", "Total", fB, bd=bTot)
-    for col in "DEF": w(wsG, f"{col}{r}", f"=SUM({col}{first}:{col}{r-1})", fB, ACC, bd=bTot)
+    for col in COLS: w(wsG, f"{col}{r}", f"=SUM({col}{first}:{col}{r-1})", fB, ACC, bd=bTot)
     r += 2
     w(wsG, f"C{r}", "b) Commitments", fB); r += 1
     for lbl in ["Estimated amount of contracts remaining to be executed on capital account and not provided for", "Other commitments"]:
         w(wsG, f"C{r}", lbl)
-        for col in "DEF": w(wsG, f"{col}{r}", "Nil", al=Alignment(horizontal="right"))
+        for col in COLS: w(wsG, f"{col}{r}", "Nil", al=Alignment(horizontal="right"))
         r += 1
     r += 1
     EB_ROW = r
     w(wsG, f"B{r}", "=B8+1", fB); w(wsG, f"C{r}", "Employee benefit plans", fB); r += 2
     w(wsG, f"C{r}", "A. Defined contribution plan", fB); r += 1
     w(wsG, f"C{r}", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsG, f"{'DEF'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsG, f"{COLS[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsG.row_dimensions[r].height = 30
     r += 1
     w(wsG, f"C{r}", "Employer's contribution to provident fund and other funds")
-    for col in "DEF": w(wsG, f"{col}{r}", "=" + nref("Contribution to provident and other funds", col), fmt=ACC)
+    for col in COLS: w(wsG, f"{col}{r}", "=" + nref("Contribution to provident and other funds", col), fmt=ACC)
     r += 2
     w(wsG, f"C{r}", "B. Defined benefit obligation - Gratuity (unfunded)", fB); r += 1
-    w(wsG, f"C{r}", "The Company provides for gratuity to eligible employees as per the Payment of Gratuity Act, 1972. The scheme is unfunded.", al=just); wsG.merge_cells(f"C{r}:F{r}"); r += 1
+    w(wsG, f"C{r}", "The Company provides for gratuity to eligible employees as per the Payment of Gratuity Act, 1972. The scheme is unfunded.", al=just); wsG.merge_cells(f"C{r}:{LASTC}{r}"); r += 1
     w(wsG, f"C{r}", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsG, f"{'DEF'[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsG, f"{COLS[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
     wsG.row_dimensions[r].height = 30
     r += 1
     w(wsG, f"C{r}", "Gratuity expense recognised in the Statement of Profit and Loss")
-    for col in "DEF": w(wsG, f"{col}{r}", "=" + nref("Gratuity", col), fmt=ACC)
+    for col in COLS: w(wsG, f"{col}{r}", "=" + nref("Gratuity", col), fmt=ACC)
     r += 1
     w(wsG, f"C{r}", "Present value of obligation at the end of the year (Provision for gratuity)")
-    for col in "DEF": w(wsG, f"{col}{r}", "=" + nref("Provision for gratuity", col), fmt=ACC)
+    for col in COLS: w(wsG, f"{col}{r}", "=" + nref("Provision for gratuity", col), fmt=ACC)
     r += 1
     w(wsG, f"C{r}", "Actuarial assumptions (discount rate, salary escalation, attrition, mortality) - as per actuarial valuation report, to be incorporated.", fI)
 
     # ================================================================== Tax Computation (statement of tax shelter)
-    wsX = sheet(TX, {"A": 1, "B": 5, "C": 66, "D": 16.8, "E": 16.8, "F": 16.8})
+    wsX = sheet(TX, {"A": 1, "B": 5, "C": 66, **{c: 16.8 for c in COLS}})
     head(wsX, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS")
     r = 8
     w(wsX, f"B{r}", f"={q(GC)}!B{EB_ROW}+1", fB); w(wsX, f"C{r}", "Statement of tax shelter", fB)
     r += 2
     w(wsX, f"C{r}", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsX, f"{'DEF'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsX, f"{COLS[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsX.row_dimensions[r].height = 30
     r += 1
     TXR = {}
@@ -1224,7 +1502,7 @@ def build(cfg, data, src, out_path, overrides=None):
     def tx(label, fn, key=None, fmt=ACC, bold=False, inp=False):
         nonlocal r
         w(wsX, f"C{r}", label, fB if bold else fN)
-        for i, col in enumerate("DEF"):
+        for i, col in enumerate(COLS):
             v = fn(i, col) if callable(fn) else fn
             if v is not None: w(wsX, f"{col}{r}", v, fBlue if inp else (fB if bold else fN), fmt, fill=yel if inp else None)
         if key: TXR[key] = r
@@ -1253,20 +1531,25 @@ def build(cfg, data, src, out_path, overrides=None):
     tx("Taxable income (A + E)", lambda i, c: f"={c}{TXR['pbt']}+{c}{ti}", "ti", bold=True)
     tx("Tax payable at normal rate", lambda i, c: f"=MAX(0,{c}{TXR['ti']})*{c}{TXR['rate']}", "tp")
     tx("Current tax as per Restated Summary Statement of Profit and Loss", lambda i, c: "=" + P("TAXC", i), "ct")
+    for row in wsA.iter_rows(min_col=5, max_col=6):
+        for c in row:
+            if isinstance(c.value, str) and "{TAXTP_" in c.value:
+                for i_, p_ in enumerate(PK):
+                    c.value = c.value.replace("{TAXTP_" + p_ + "}", f"{q(TX)}!${COLS[i_]}${TXR['tp']}")
     tx("Difference", lambda i, c: f"={c}{TXR['tp']}-{c}{TXR['ct']}")
     r += 1
     w(wsX, f"C{r}", "Note: Depreciation as per the Income-tax Act and payments under Sec 43B are to be taken from the computation of total income / tax audit report of the respective years.", fI, al=just)
-    wsX.merge_cells(f"C{r}:F{r+1}")
+    wsX.merge_cells(f"C{r}:{LASTC}{r+1}")
 
     # ================================================================== Accounting ratios
-    wsR = sheet(AR_, {"A": 1, "B": 5, "C": 70, "D": 16.8, "E": 16.8, "F": 16.8})
+    wsR = sheet(AR_, {"A": 1, "B": 5, "C": 70, **{c: 16.8 for c in COLS}})
     head(wsR, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS")
     r = 8
     w(wsR, f"B{r}", f"={q(TX)}!B8+1", fB); w(wsR, f"C{r}", "Summary of accounting ratios", fB)
     r += 2
     w(wsR, f"C{r}", "Particulars", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsR, f"{'DEF'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsR, f"{COLS[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsR.row_dimensions[r].height = 30
     r += 1
     RT = {}
@@ -1275,7 +1558,7 @@ def build(cfg, data, src, out_path, overrides=None):
     def rl(label, fn, key=None, fmt=ACC, bold=False):
         nonlocal r
         w(wsR, f"C{r}", label, fB if bold else fN)
-        for i, col in enumerate("DEF"):
+        for i, col in enumerate(COLS):
             w(wsR, f"{col}{r}", fn(i, col), fB if bold else fN, fmt)
         if key: RT[key] = r
         r += 1
@@ -1303,32 +1586,41 @@ def build(cfg, data, src, out_path, overrides=None):
     rl("Current liabilities (I)", lambda i, c: "=" + Bf("CL", c), "cl")
     rl("Current ratio (H / I)", lambda i, c: f"=IFERROR({c}{RT['ca']}/{c}{RT['cl']},0)", "cr", '0.00', True)
     r += 1
-    for t in ["Notes:", "1. Ratios have been calculated as below:",
+    for t in (["Notes:", "1. Ratios have been calculated as below:",
               "Earnings per share (Rs.) = Restated profit after tax / Weighted average number of equity shares outstanding during the year (adjusted for bonus / split)",
               "Return on net worth (%) = Restated profit after tax / Restated net worth at the end of the year",
               "Net asset value per equity share (Rs.) = Restated net worth at the end of the year / Number of equity shares outstanding at the end of the year",
               "EBITDA = Restated profit after tax + tax expense + depreciation and amortisation + finance costs - other income",
               "2. \"Net worth\" means the aggregate value of the paid-up share capital and reserves and surplus as per the Restated Summary Statement of Assets and Liabilities.",
-              "3. The figures disclosed above are based on the Restated Summary Statements of the Company."]:
-        w(wsR, f"C{r}", t, fB if t == "Notes:" else fN, al=just); wsR.merge_cells(f"C{r}:F{r}"); r += 1
+              "3. The figures disclosed above are based on the Restated Summary Statements of the Company."]
+              + (["4. Ratios for the period ended " + _dl[0] + " are not annualised."] if STUB else [])):
+        w(wsR, f"C{r}", t, fB if t == "Notes:" else fN, al=just); wsR.merge_cells(f"C{r}:{LASTC}{r}"); r += 1
     nP.r = EPS_START
     nP.line("Restated profit for the year attributable to equity shareholders", lambda i, c: "=" + P("PAT", i))
     nP.line("Weighted average number of equity shares (adjusted for bonus / split)", lambda i, c: f"={q(AR_)}!{c}{RT['wab']}", fmt=ACC0)
     eps_note = nP.line("Basic and diluted earnings per share (Rs.)", lambda i, c: f"={q(AR_)}!{c}{RT['eps']}", fmt="#,##0.00", bold=True)
     nP.line("Face value per equity share (Rs.)", lambda i, c: f"={md['fv']}", fmt="#,##0")
-    for col in "DEF":
+    for col in COLS:
         w(wsP, f"{col}{eps_r}", f"={q(NPL)}!{col}{eps_note}", fN, "#,##0.00")
 
     # ================================================================== Analytical Ratios
-    wsY = sheet(AN, {"A": 1, "B": 5, "C": 34, "D": 30, "E": 30, "F": 13, "G": 13, "H": 13, "I": 12, "J": 12, "K": 40})
-    head(wsY, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span="K")
+    ACOL = "".join(CL(6 + i) for i in range(N))                          # ratio value per period (F ...)
+    FULL = [i for i, p_ in enumerate(PK) if p_ != "FYS"]                   # variance only between full years
+    VPAIRS = list(zip(FULL[:-1], FULL[1:]))
+    VCOL = "".join(CL(6 + N + j) for j in range(len(VPAIRS)))
+    RCOL = CL(6 + N + len(VPAIRS))
+    wsY = sheet(AN, {"A": 1, "B": 5, "C": 34, "D": 30, "E": 30, **{c: 13 for c in ACOL}, **{c: 12 for c in VCOL}, RCOL: 40})
+    head(wsY, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span=RCOL)
     r = 8
     w(wsY, f"B{r}", f"={q(AR_)}!B8+1", fB); w(wsY, f"C{r}", "Analytical ratios", fB)
     r += 2
-    for i, h in enumerate(["Ratio", "Numerator", "Denominator", None, None, None, "% Variance 2026 vs 2025", "% Variance 2025 vs 2024", "Reason for variance (more than 25%)"]):
-        if h: w(wsY, f"{'CDEFGHIJK'[i]}{r}", h, fB, bd=bTB, al=wrapc)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsY, f"{'FGH'[i]}{r}", f'=TEXT({md[k]},"mmmm dd, yyyy")', fB, bd=bTB, al=wrapc)
+    for col, h in zip("CDE", ["Ratio", "Numerator", "Denominator"]):
+        w(wsY, f"{col}{r}", h, fB, bd=bTB, al=wrapc)
+    for j, (a_, b_) in enumerate(VPAIRS):
+        w(wsY, f"{VCOL[j]}{r}", f"% Variance {Y[DKL[a_]].year} vs {Y[DKL[b_]].year}", fB, bd=bTB, al=wrapc)
+    w(wsY, f"{RCOL}{r}", "Reason for variance (more than 25%)", fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsY, f"{ACOL[i]}{r}", f'=TEXT({md[k]},"mmmm dd, yyyy")', fB, bd=bTB, al=wrapc)
     wsY.row_dimensions[r].height = 30
     r += 1
     avg = lambda key, i: f"(({Bf(key, CUR[i])})+({Bf(key, PRV[i])}))/2"
@@ -1337,7 +1629,7 @@ def build(cfg, data, src, out_path, overrides=None):
         ("Current ratio", "Current assets", "Current liabilities", lambda i: f"=IFERROR({Bf('CA', CUR[i])}/{Bf('CL', CUR[i])},0)", '0.00'),
         ("Debt-equity ratio", "Total debt", "Shareholder's equity", lambda i: f"=IFERROR({debt(CUR[i])}/{Bf('EQ', CUR[i])},0)", '0.00'),
         ("Debt service coverage ratio", "Earnings available for debt service", "Debt service",
-         lambda i: f"=IFERROR(({P('PAT', i)}+{P('DEP', i)}+{P('FIN', i)})/({P('FIN', i)}+{'FGH'[i]}{{REPAY}}),0)", '0.00'),
+         lambda i: f"=IFERROR(({P('PAT', i)}+{P('DEP', i)}+{P('FIN', i)})/({P('FIN', i)}+{ACOL[i]}{{REPAY}}),0)", '0.00'),
         ("Return on equity ratio", "Net profit after taxes", "Average shareholders' equity", lambda i: f"=IFERROR({P('PAT', i)}/{avg('EQ', i)},0)", PCT),
         ("Inventory turnover ratio", "Cost of goods sold", "Average inventory", lambda i: f"=IFERROR(({P('PUR', i)}+{P('CHG', i)})/{avg('INV', i)},0)", '0.00'),
         ("Trade receivables turnover ratio", "Net credit sales", "Average trade receivables", lambda i: f"=IFERROR({P('REV', i)}/{avg('TR', i)},0)", '0.00'),
@@ -1353,26 +1645,29 @@ def build(cfg, data, src, out_path, overrides=None):
     dscr_cells = []
     for nm, num, den, fn, fm in ratios:
         w(wsY, f"C{r}", nm); w(wsY, f"D{r}", num); w(wsY, f"E{r}", den)
-        for i in range(3):
+        for i in range(N):
             v = fn(i)
             if "{REPAY}" in v: dscr_cells.append((r, i))
-            w(wsY, f"{'FGH'[i]}{r}", v, fmt=fm)
-        w(wsY, f"I{r}", f"=IFERROR(F{r}/G{r}-1,0)", fmt=PCT)
-        w(wsY, f"J{r}", f"=IFERROR(G{r}/H{r}-1,0)", fmt=PCT)
-        w(wsY, f"K{r}", f'=IF(OR(ABS(I{r})>25%,ABS(J{r})>25%),"[Reason to be given by management]","")', fI)
+            w(wsY, f"{ACOL[i]}{r}", v, fmt=fm)
+        for j, (a_, b_) in enumerate(VPAIRS):
+            w(wsY, f"{VCOL[j]}{r}", f"=IFERROR({ACOL[a_]}{r}/{ACOL[b_]}{r}-1,0)", fmt=PCT)
+        w(wsY, f"{RCOL}{r}", '=IF(OR(' + ",".join(f"ABS({v_}{r})>25%" for v_ in VCOL) + '),"[Reason to be given by management]","")', fI)
         r += 1
     r += 1
     w(wsY, f"C{r}", "Principal repayment of long-term borrowings during the year (for DSCR)")
-    for col in "FGH": w(wsY, f"{col}{r}", 0, fBlue, ACC, fill=yel)
+    for col in ACOL: w(wsY, f"{col}{r}", 0, fBlue, ACC, fill=yel)
     for rr, i in dscr_cells:
-        c = wsY[f"{'FGH'[i]}{rr}"]; c.value = c.value.replace("{REPAY}", str(r))
+        c = wsY[f"{ACOL[i]}{rr}"]; c.value = c.value.replace("{REPAY}", str(r))
+    if STUB:
+        r += 2
+        w(wsY, f"C{r}", "Ratios for the period ended " + _dl[0] + " are not annualised; variances are given between full financial years.", fI)
 
     # ================================================================== Capitalisation
     wsK = sheet(CP, {"A": 1, "B": 5, "C": 60, "D": 20, "E": 20})
     head(wsK, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span="E")
     r = 8
     w(wsK, f"B{r}", f"={q(AN)}!B8+1", fB); w(wsK, f"C{r}", "Capitalisation statement", fB); r += 2
-    w(wsK, f"C{r}", "Particulars", fB, bd=bTB); w(wsK, f"D{r}", dtxt("d26", "Pre-issue as at\n"), fB, bd=bTB, al=wrapc)
+    w(wsK, f"C{r}", "Particulars", fB, bd=bTB); w(wsK, f"D{r}", dtxt(DKL[0], "Pre-issue as at\n"), fB, bd=bTB, al=wrapc)
     w(wsK, f"E{r}", "Post-issue *", fB, bd=bTB, al=wrapc); wsK.row_dimensions[r].height = 30; r += 1
     w(wsK, f"C{r}", "Borrowings", fB); r += 1
     s1 = r; w(wsK, f"C{r}", "Short-term borrowings"); w(wsK, f"D{r}", "=" + Bf("STB", "D"), fmt=ACC); r += 1
@@ -1411,18 +1706,20 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsD, f"C{r}", t, al=just); wsD.row_dimensions[r].height = 28 if len(t) > 120 else 15; r += 1
 
     # ================================================================== SOA_5
-    wsV = sheet(SA, {"A": 1, "B": 5, "C": 66, "D": 8, "E": 16.8, "F": 16.8, "G": 16.8})
-    head(wsV, "ANNEXURE V - STATEMENT OF ADJUSTMENTS TO AUDITED FINANCIAL STATEMENTS", span="G")
+    SOC = "".join(CL(5 + i) for i in range(N))          # E, F, G[, H]
+    SCK = "".join(CL(5 + N + i) for i in range(N))      # check cells next to the statement
+    wsV = sheet(SA, {"A": 1, "B": 5, "C": 66, "D": 8, **{c: 16.8 for c in SOC}})
+    head(wsV, "ANNEXURE V - STATEMENT OF ADJUSTMENTS TO AUDITED FINANCIAL STATEMENTS", span=SOC[-1])
     r = 8
     w(wsV, f"B{r}", 1, fB); w(wsV, f"C{r}", "Reconciliation of restated profits", fB); r += 2
     w(wsV, f"C{r}", "Particulars", fB, bd=bTB); w(wsV, f"D{r}", "Note", fB, bd=bTB, al=wrapc)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsV, f"{'EFG'[i]}{r}", dtxt(k, "For the year ended\n"), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsV, f"{SOC[i]}{r}", dtxt(k, per_lbl(k)), fB, bd=bTB, al=wrapc)
     wsV.row_dimensions[r].height = 30
     r += 1
     pb = r
     w(wsV, f"C{r}", "Net profit / (loss) after tax as per audited financial statements")
-    for i, col in enumerate("EFG"): w(wsV, f"{col}{r}", "=" + nref("__bookpat", "DEF"[i]), fmt=ACC)
+    for i, col in enumerate(SOC): w(wsV, f"{col}{r}", "=" + nref("__bookpat", COLS[i]), fmt=ACC)
     r += 1
     w(wsV, f"C{r}", "Adjusted for:", fI); r += 1
 
@@ -1436,55 +1733,55 @@ def build(cfg, data, src, out_path, overrides=None):
     fa_ = r
     for k, lbl in enumerate(ADJ_PL):
         w(wsV, f"C{r}", lbl); w(wsV, f"D{r}", chr(65 + k), al=Alignment(horizontal="center"))
-        for i, col in enumerate("EFG"): w(wsV, f"{col}{r}", "=-" + pl_adj(i, lbl), fmt=ACC)
+        for i, col in enumerate(SOC): w(wsV, f"{col}{r}", "=-" + pl_adj(i, lbl), fmt=ACC)
         r += 1
     w(wsV, f"C{r}", "Other adjustments")
-    for i, col in enumerate("EFG"): w(wsV, f"{col}{r}", f"=-{pl_adj(i)}" + (f"-SUM({col}{fa_}:{col}{r-1})" if r > fa_ else ""), fmt=ACC)
+    for i, col in enumerate(SOC): w(wsV, f"{col}{r}", f"=-{pl_adj(i)}" + (f"-SUM({col}{fa_}:{col}{r-1})" if r > fa_ else ""), fmt=ACC)
     r += 1
     na_ = r
     w(wsV, f"C{r}", "Net adjustment in Statement of Profit and Loss", fB, bd=bT)
-    for col in "EFG": w(wsV, f"{col}{r}", f"=SUM({col}{fa_}:{col}{r-1})", fB, ACC, bd=bT)
+    for col in SOC: w(wsV, f"{col}{r}", f"=SUM({col}{fa_}:{col}{r-1})", fB, ACC, bd=bT)
     r += 1
     w(wsV, f"C{r}", "Net profit / (loss) after tax as per Restated Summary Statements", fB, bd=bTot)
-    for i, col in enumerate("EFG"): w(wsV, f"{col}{r}", f"={col}{pb}+{col}{na_}", fB, ACC, bd=bTot)
-    for i, col in enumerate("EFG"): w(wsV, f"{'HIJ'[i]}{r}", f"=ROUND({col}{r}-{P('PAT', i)},2)", fS, ACC)
+    for i, col in enumerate(SOC): w(wsV, f"{col}{r}", f"={col}{pb}+{col}{na_}", fB, ACC, bd=bTot)
+    for i, col in enumerate(SOC): w(wsV, f"{SCK[i]}{r}", f"=ROUND({col}{r}-{P('PAT', i)},2)", fS, ACC)
     r += 2
     w(wsV, f"C{r}", "Notes for reconciliation of profit:", fB); r += 1
     for t in ([f"{chr(65 + k)}) {e.get('narration', '')}" for k, e in enumerate(C.get("adjustments", []))] or ["No restatement adjustments."]):
-        w(wsV, f"C{r}", t, al=just); wsV.merge_cells(f"C{r}:G{r}"); wsV.row_dimensions[r].height = 44; r += 1
+        w(wsV, f"C{r}", t, al=just); wsV.merge_cells(f"C{r}:{SOC[-1]}{r}"); wsV.row_dimensions[r].height = 44; r += 1
     r += 1
     w(wsV, f"B{r}", 2, fB); w(wsV, f"C{r}", "Reconciliation of restated shareholders' funds", fB); r += 2
     w(wsV, f"C{r}", "Particulars", fB, bd=bTB); w(wsV, f"D{r}", "Note", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsV, f"{'EFG'[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
+    for i, k in enumerate(DKL):
+        w(wsV, f"{SOC[i]}{r}", dtxt(k), fB, bd=bTB, al=wrapc)
     wsV.row_dimensions[r].height = 30
     r += 1
     s_a = r
     w(wsV, f"C{r}", "Shareholders' funds as per audited financial statements (a)")
-    for i, col in enumerate("EFG"):
-        w(wsV, f"{col}{r}", f"={tref('SC', 'DEF'[i])}+{q(NE)}!{'DEF'[i]}{RSR['bookbal']}", fmt=ACC)
+    for i, col in enumerate(SOC):
+        w(wsV, f"{col}{r}", f"={tref('SC', COLS[i])}+{q(NE)}!{COLS[i]}{RSR['bookbal']}", fmt=ACC)
     r += 1
     w(wsV, f"C{r}", "Adjustments:", fI); r += 1
     s_o = r
     w(wsV, f"C{r}", "Opening balance of restatement adjustments")
-    for i, col in enumerate("EFG"):
-        pc = "EFG"[i]
+    for i, col in enumerate(SOC):
+        pc = PCOLS[i]
         w(wsV, f"{col}{r}", f"={q(NE)}!{pc}{RSR['close']}-{q(NE)}!{pc}{RSR['bookbal']}", fmt=ACC)
     r += 1
     w(wsV, f"C{r}", "Change in Statement of Profit and Loss (as above)")
-    for col in "EFG": w(wsV, f"{col}{r}", f"={col}{na_}", fmt=ACC)
+    for col in SOC: w(wsV, f"{col}{r}", f"={col}{na_}", fmt=ACC)
     r += 1
     w(wsV, f"C{r}", "Adjustments routed directly through reserves"); w(wsV, f"D{r}", "A", al=Alignment(horizontal="center"))
-    for i, col in enumerate("EFG"):
-        w(wsV, f"{col}{r}", f"={q(NE)}!{'DEF'[i]}{RSR['direct']}", fmt=ACC)
+    for i, col in enumerate(SOC):
+        w(wsV, f"{col}{r}", f"={q(NE)}!{COLS[i]}{RSR['direct']}", fmt=ACC)
     r += 1
     s_b = r
     w(wsV, f"C{r}", "Closing balance of restatement adjustments (b)", fB, bd=bT)
-    for col in "EFG": w(wsV, f"{col}{r}", f"=SUM({col}{s_o}:{col}{r-1})", fB, ACC, bd=bT)
+    for col in SOC: w(wsV, f"{col}{r}", f"=SUM({col}{s_o}:{col}{r-1})", fB, ACC, bd=bT)
     r += 1
     w(wsV, f"C{r}", "Restated shareholders' funds (a + b)", fB, bd=bTot)
-    for col in "EFG": w(wsV, f"{col}{r}", f"={col}{s_a}+{col}{s_b}", fB, ACC, bd=bTot)
-    for i, col in enumerate("EFG"): w(wsV, f"{'HIJ'[i]}{r}", f"=ROUND({col}{r}-{Bf('EQ', 'DEF'[i])},2)", fS, ACC)
+    for col in SOC: w(wsV, f"{col}{r}", f"={col}{s_a}+{col}{s_b}", fB, ACC, bd=bTot)
+    for i, col in enumerate(SOC): w(wsV, f"{SCK[i]}{r}", f"=ROUND({col}{r}-{Bf('EQ', COLS[i])},2)", fS, ACC)
     r += 2
     w(wsV, f"B{r}", 3, fB); w(wsV, f"C{r}", "Material regrouping", fB); r += 1
     w(wsV, f"C{r}", "Appropriate regroupings have been made in the Restated Summary Statements, wherever required, by reclassification of the corresponding items of income, "
@@ -1492,26 +1789,27 @@ def build(cfg, data, src, out_path, overrides=None):
                     "financial statements and the requirements of the SEBI ICDR Regulations. These include presentation of credit balances of trade receivables as advance from "
                     "customers and debit balances of trade payables as advance to suppliers, group health insurance under employee benefits expense, credit card dues under other "
                     "current liabilities and the gratuity provision under long-term provisions.", al=just)
-    wsV.merge_cells(f"C{r}:G{r}"); wsV.row_dimensions[r].height = 72; r += 2
+    wsV.merge_cells(f"C{r}:{SOC[-1]}{r}"); wsV.row_dimensions[r].height = 72; r += 2
     w(wsV, f"B{r}", 4, fB); w(wsV, f"C{r}", "Non-adjusting items", fB); r += 1
-    w(wsV, f"C{r}", "There are no audit qualifications in the auditor's reports for the years ended " + DATES3 + " which require any adjustment "
+    w(wsV, f"C{r}", "There are no audit qualifications in the auditor's reports for the " + ("period / years" if STUB else "years") + " ended " + DATES3 + " which require any adjustment "
                     "in the Restated Summary Statements.", al=just)
-    wsV.merge_cells(f"C{r}:G{r}"); wsV.row_dimensions[r].height = 30
+    wsV.merge_cells(f"C{r}:{SOC[-1]}{r}"); wsV.row_dimensions[r].height = 30
 
     # ================================================================== source schedules: Shareholder Register, ageing
-    wsH = sheet(SR, {"A": 4, "B": 40, "C": 16, "D": 16, "E": 16})
+    SRC_ = "".join(CL(3 + i) for i in range(N))
+    wsH = sheet(SR, {"A": 4, "B": 40, **{c: 16 for c in SRC_}})
     w(wsH, "B2", "Register of members - number of equity shares held", fB)
     w(wsH, "B4", "Name of shareholder", fB, bd=bTB)
-    for i, k in enumerate(["d26", "d25", "d24"]):
-        w(wsH, f"{'CDE'[i]}4", f'=TEXT({md[k]},"dd-mm-yyyy")', fB, bd=bTB, al=wrapc)
-    holders = [(h["name"], h.get("s26", 0), h.get("s25", 0), h.get("s24", 0)) for h in SH] or [("[Shareholder name]", 0, 0, 0)]
+    for i, k in enumerate(DKL):
+        w(wsH, f"{SRC_[i]}4", f'=TEXT({md[k]},"dd-mm-yyyy")', fB, bd=bTB, al=wrapc)
+    holders = [(h["name"], *[float(h.get(SHK[p_], 0) or 0) for p_ in PK]) for h in SH] or [("[Shareholder name]", *[0] * N)]
     r = 5
     for h in holders:
         w(wsH, f"B{r}", h[0])
-        for i in range(3): w(wsH, f"{'CDE'[i]}{r}", h[1 + i], fBlue, ACC0)
+        for i in range(N): w(wsH, f"{SRC_[i]}{r}", h[1 + i], fBlue, ACC0)
         r += 1
     w(wsH, f"B{r}", "Total", fB, bd=bTot)
-    for col in "CDE": w(wsH, f"{col}{r}", f"=SUM({col}5:{col}{r-1})", fB, ACC0, bd=bTot)
+    for col in SRC_: w(wsH, f"{col}{r}", f"=SUM({col}5:{col}{r-1})", fB, ACC0, bd=bTot)
     w(wsH, f"B{r+2}", "Source: Register of members / audited financial statements (Note on share capital).", fI)
 
     for nm, buckets, data in [
@@ -1523,7 +1821,7 @@ def build(cfg, data, src, out_path, overrides=None):
         w(wsZ, "B2", f"{nm} schedule (amount in Rs.)", fB)
         rows_lbl = (["(i) Undisputed - considered good", "(ii) Undisputed - considered doubtful", "(iii) Disputed - considered good", "(iv) Disputed - considered doubtful"]
                     if nm == DRA else ["(i) MSME", "(ii) Others", "(iii) Disputed dues - MSME", "(iv) Disputed dues - Others"])
-        for k, dk in enumerate(["d26", "d25", "d24"]):
+        for k, dk in enumerate(DKL):
             base = 5 + 8 * k
             w(wsZ, f"B{base-2}", dtxt(dk, "As at "), fB)
             w(wsZ, f"B{base-1}", "Particulars", fB, bd=bTB)
@@ -1533,18 +1831,54 @@ def build(cfg, data, src, out_path, overrides=None):
                 for i in range(len(buckets)):
                     v = data.get(dk, [[0] * 5] * 4)
                     val = float(v[j][i]) if j < len(v) and i < len(v[j]) and v[j][i] not in (None, "") else 0
-                    w(wsZ, f"{CL(3+i)}{base+j}", val, fBlue, ACC, fill=yel if dk == "d26" else None)
-        w(wsZ, "B28", "Source: debtors / creditors ageing reports as at each balance sheet date (amount in Rs.).", fI)
+                    w(wsZ, f"{CL(3+i)}{base+j}", val, fBlue, ACC, fill=yel if k == 0 else None)
+        w(wsZ, f"B{5 + 8 * N - 1}", "Source: debtors / creditors ageing reports as at each balance sheet date (amount in Rs.).", fI)
+
+    # ================================================================== Borrowing Terms (from sanction letters; outstanding from the TBs)
+    BR = RST.get("borrowings") or []
+    if BR:
+        BT = "Borrowing Terms"
+        wsBT = sheet(BT, {"A": 1, "B": 5, "C": 30, "D": 22, "E": 14, "F": 22, "G": 26, "H": 40, "I": 30, **{CL(10 + i): 14 for i in range(N)}})
+        head(wsBT, "ANNEXURE VI - NOTES TO RESTATED SUMMARY STATEMENTS", span=CL(9 + N))
+        r = 8
+        w(wsBT, f"B{r}", "Statement of principal terms of secured and unsecured borrowings", fB); r += 2
+        hh = ["Sr.", "Name of the lender", "Nature of facility", "Sanctioned amount", "Rate of interest", "Repayment / tenure", "Security", "Guarantee"]
+        for j, h in enumerate(hh):
+            w(wsBT, f"{CL(2 + j)}{r}", h, fB, bd=bTB, al=wrapc)
+        for i, k in enumerate(DKL):
+            w(wsBT, f"{CL(10 + i)}{r}", dtxt(k, "Outstanding as at\n"), fB, bd=bTB, al=wrapc)
+        wsBT.row_dimensions[r].height = 30; r += 1
+        first = r
+        for k_, b_ in enumerate(BR):
+            vals = [k_ + 1, b_.get("lender", ""), b_.get("facility", ""), (float(b_["sanctioned"]) / 100000) if b_.get("sanctioned") not in (None, "") else "",
+                    b_.get("rate", ""), b_.get("tenure", ""), b_.get("security", ""), b_.get("guarantee", "")]
+            for j, v in enumerate(vals):
+                w(wsBT, f"{CL(2 + j)}{r}", v, fBlue if j else fN, ACC if j == 3 and v != "" else None, al=wrapl if j in (6, 7) else None)
+            led = b_.get("ledger") or ""
+            for i, fy in enumerate(PK):
+                if led:
+                    w(wsBT, f"{CL(10 + i)}{r}", f'=SUMIF({q(TBN[fy])}!$A:$A,"{led}",{q(TBN[fy])}!$I:$I)', fmt=ACC)
+            wsBT.row_dimensions[r].height = 45
+            r += 1
+        w(wsBT, f"C{r}", "Total", fB, bd=bTot)
+        for i in range(N):
+            c_ = CL(10 + i)
+            w(wsBT, f"{c_}{r}", f"=SUM({c_}{first}:{c_}{r - 1})", fB, ACC, bd=bTot)
+            w(wsBT, f"{c_}{r + 1}", f"=ROUND({c_}{r}-({Bf('LTB', COLS[i])}+{Bf('STB', COLS[i])}),2)", fS, ACC)
+        w(wsBT, f"C{r + 1}", "Difference from borrowings in BS_1 (facilities not listed above)", fG)
+        r += 3
+        w(wsBT, f"C{r}", "Source: sanction letters and loan statements; sanctioned amount in Rs. lakhs; outstanding balances from the trial balances (Rs. lakhs).", fI)
 
     # ------------------------------------------------------------------ sheet order (reference style)
-    order = [MD, BS, PL, CF, SAP, SA, NE, NL, NP, NA, NPL, RPT, GC, TX, AR_, AN, CP, AD, TBN["FY26"], TBN["FY25"], TBN["FY24"], DRA, CRA, SR, ADJ]
+    order = [MD, BS, PL, CF, SAP, SA, NE, NL, NP, NA, NPL, RPT, GC, TX, AR_, AN, CP, AD] + [s_ for s_ in ("Borrowing Terms",) if s_ in wb.sheetnames] \
+        + [TBN[p_] for p_ in PK] + [DRA, CRA, SR, ADJ] + [s_ for s_ in ("Restatement Inputs", "FA Restatement", "FA Register") if s_ in wb.sheetnames]
     wb._sheets = [wb[s] for s in order]
     for s in [BS, PL, CF, SAP, SA, NE, NL, NP, NA, NPL, RPT, GC, TX, AR_, AN, CP, AD]:
         wsx = wb[s]
         wsx.page_setup.orientation = "portrait"; wsx.page_setup.fitToWidth = 1; wsx.page_setup.fitToHeight = 0
         wsx.sheet_properties.pageSetUpPr.fitToPage = True
-    wb[BS].print_area = f"B2:F{wsB.max_row}"
-    wb[PL].print_area = f"B2:F{wsP.max_row}"
+    wb[BS].print_area = f"B2:{LASTC}{wsB.max_row}"
+    wb[PL].print_area = f"B2:{LASTC}{wsP.max_row}"
     wb.active = 1
     from openpyxl.workbook.properties import CalcProperties
     wb.calculation = CalcProperties(fullCalcOnLoad=True)

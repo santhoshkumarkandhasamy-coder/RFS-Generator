@@ -13,14 +13,14 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract
+from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract, restate
 
 
 def _reload_if_updated():
     """After a git pull while the app is running, Streamlit re-runs app.py but keeps the old rfs modules in memory:
     reload any module whose file changed since it was loaded."""
     import importlib
-    for mod in (classify, mapping, tally, docreader, regulatory, extract, builder, exporters):     # dependencies first
+    for mod in (classify, mapping, tally, docreader, regulatory, extract, restate, builder, exporters):     # dependencies first
         try:
             m = os.path.getmtime(mod.__file__)
         except OSError:
@@ -34,7 +34,8 @@ def _reload_if_updated():
 _reload_if_updated()
 
 st.set_page_config(page_title="RFS Generator", layout="wide")
-SLOTS = [("FY26", "Latest year"), ("FY25", "Previous year"), ("FY24", "Earliest year")]
+BASE_SLOTS = [("FY26", "Latest year"), ("FY25", "Previous year"), ("FY24", "Earliest year")]
+SLOTS = list(BASE_SLOTS)          # a stub period slot is added in front when the Company tab says so
 
 ss = st.session_state
 ss.setdefault("tb", {})          # slot -> parsed rows
@@ -71,7 +72,8 @@ with st.sidebar:
             ss.overrides = proj.get("overrides", {})
             ss._loaded = up.name + str(up.size)
             quick_msg.success(f"Project {up.name} loaded. Upload the trial balances again.")
-    st.markdown("**Steps**\n1. ICDR & DRHP check\n2. Company\n3. Trial balances\n4. Supporting documents\n5. Mapping\n6. Shareholders & ageing\n7. Adjustments\n8. Generate")
+    st.markdown("**Steps**\n1. ICDR & DRHP check\n2. Company\n3. Trial balances\n4. Supporting documents\n5. Mapping\n6. Shareholders & ageing\n"
+                "7. Restatement (FA register, gratuity, MSME, tax, borrowings)\n8. Adjustments\n9. Generate")
     if not ss.get("_settings_loaded"):
         regulatory.load_settings()
         ss._settings_loaded = True
@@ -91,9 +93,9 @@ with st.sidebar:
                 st.error(f"Could not save: {e}")
 
 TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. Supporting documents", "5. Mapping review",
-                "6. Shareholders & ageing", "7. Adjustments", "8. Generate"])
-reg_tab, docs_tab = TABS[0], TABS[3]
-tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[6], TABS[7]]
+                "6. Shareholders & ageing", "7. Restatement", "8. Adjustments", "9. Generate"])
+reg_tab, docs_tab, rst_tab = TABS[0], TABS[3], TABS[6]
+tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[7], TABS[8]]
 
 # ---------------------------------------------------------------- 1. company
 LABELS = {"name": "Company name", "former": "Formerly known as", "cin": "CIN", "address": "Registered address",
@@ -171,6 +173,15 @@ with tabs[0]:
         bonus = st.number_input("Bonus / split factor after latest year end (1 = none)", value=float(P("bonus_factor", 1.0)))
         tax_rate = st.number_input("Tax rate (e.g. 0.25168 for Sec 115BAA)", value=float(P("tax_rate", 0.25168)), format="%.5f")
         closing_stock = st.number_input("Closing stock at latest year end (Rs) - not in Tally TB", value=float(P("closing_stock", 0.0)))
+        has_stub = st.checkbox("Include a stub period (interim period after the latest year end)", value=bool(P("stub_end")),
+                               help="ICDR: restated financial information for the stub period is needed when the latest audited year is more "
+                                    "than six months old at filing. Upload the stub period trial balance in tab 3.")
+        if has_stub:
+            sd = P("stub_end") or latest.replace(month=9, day=30).isoformat()
+            stub_end = st.date_input("Stub period ended", dt.date.fromisoformat(sd))
+            stub_stock = st.number_input("Closing stock at the stub period end (Rs)", value=float(P("stub_closing_stock", 0.0)))
+        else:
+            stub_end, stub_stock = None, 0.0
         st.subheader("Auditor (peer reviewed)")
         aud = P("auditor", {})
         a1, a2 = st.columns(2)
@@ -186,10 +197,20 @@ with tabs[0]:
     ss.project.update({"name": name, "former": former, "cin": cin, "address": address, "segment": segment, "background": background,
                        "objects": objects, "latest": latest.isoformat(), "authorised_capital": authorised, "face_value": fv,
                        "bonus_factor": bonus, "tax_rate": tax_rate, "closing_stock": closing_stock, "auditor": auditor,
+                       "stub_end": stub_end.isoformat() if stub_end else None, "stub_closing_stock": stub_stock,
                        "directors": dir_df.fillna("").to_dict("records")})
 
 years = {"d26": latest, "d25": latest.replace(year=latest.year - 1), "d24": latest.replace(year=latest.year - 2)}
-YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24"}
+YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24", "FYS": "dS"}
+if stub_end:
+    years["dS"] = stub_end
+    SLOTS = [("FYS", "Stub period")] + BASE_SLOTS
+DKEYS = [YKEY[s_] for s_, _ in SLOTS]                 # date keys, latest first
+
+
+def plabel(slot):
+    """Display name of a period slot."""
+    return f"Period ended {years['dS']:%d-%b-%Y}" if slot == "FYS" else fy_label(years[YKEY[slot]])
 
 
 def load_tb(slot, f):
@@ -226,7 +247,7 @@ def add_doc(f):
 def year_slot(text):
     """Year slot whose financial year appears in a file name / heading (FY 2025-26, 25-26, 2025-2026, FY26, 31-Mar-2026)."""
     t = re.sub(r"[_\s./]+", "-", text.lower())
-    for slot, _ in SLOTS:
+    for slot, _ in BASE_SLOTS:          # a stub period TB is recognised from the period in its heading, not its name
         y = years[YKEY[slot]].year
         pats = [f"{y - 1}-{str(y)[2:]}", f"{str(y - 1)[2:]}-{str(y)[2:]}", f"{y - 1}-{y}", f"fy-?{str(y)[2:]}(?!-?\\d)", f"mar[a-z]*-?{y}"]
         if any(re.search(r"(?<!\d)" + p_, t) for p_ in pats):
@@ -293,8 +314,8 @@ for up in quick or []:
         slot = slot_for_period(period)
         if not slot:
             quick_msg.warning(f"{up.name} covers {period[0]:%d-%b-%Y} to {period[1]:%d-%b-%Y}, which is not one of the three RFS years "
-                              f"({', '.join(fy_label(years[YKEY[s_]]) for s_, _ in SLOTS)}). Stub periods are not supported yet - "
-                              "added to supporting documents.")
+                              f"({', '.join(plabel(s_) for s_, _ in SLOTS)}). For a stub period, tick 'Include a stub period' in the "
+                              "Company tab and upload it again - added to supporting documents.")
     else:
         slot = year_slot(up.name) or year_slot(head)
         if not slot and named_tb and not names_other_year(up.name):
@@ -310,7 +331,7 @@ for up in quick or []:
                     op, drs, crs, cl = tally.tb_check(ss.tb[slot])
                     ok = abs(op) < 1 and abs(cl) < 1 and abs(drs - crs) < 1 and sum(1 for x in ss.tb[slot] if x["inc"]) >= 10
                     if named_tb or ok:
-                        quick_msg.success(f"{up.name} -> trial balance {fy_label(years[YKEY[slot]])}")
+                        quick_msg.success(f"{up.name} -> trial balance {plabel(slot)}")
                         continue
                     raise ValueError("not a trial balance")
                 except Exception as e:
@@ -333,16 +354,16 @@ with tabs[1]:
              "PowerPoint (.pptx / .ppt) or PDF. A Tally Excel export (Detailed view) is read as-is. Other files need columns for "
              "Particulars and Opening / Debit / Credit / Closing (Dr/Cr suffix or separate Dr and Cr columns); the group and "
              "ledger structure is rebuilt from the totals.")
-    cols = st.columns(3)
+    cols = st.columns(len(SLOTS))
     for (slot, lbl), col in zip(SLOTS, cols):
         with col:
-            f = st.file_uploader(f"{lbl} - {fy_label(years[YKEY[slot]])}", type=FILE_TYPES, key="tb_" + slot)
+            f = st.file_uploader(f"{lbl} - {plabel(slot)}", type=FILE_TYPES, key="tb_" + slot)
             if f is not None and ss.get("tbname_" + slot) != f.name + str(f.size):
                 with st.spinner("Reading trial balance..."):
                     try:
                         per = tb_period(heading_text(f))
                         if per and years[YKEY[slot]] != per[1]:
-                            st.warning(f"{f.name} covers {per[0]:%d-%b-%Y} to {per[1]:%d-%b-%Y}, not {fy_label(years[YKEY[slot]])} "
+                            st.warning(f"{f.name} covers {per[0]:%d-%b-%Y} to {per[1]:%d-%b-%Y}, not {plabel(slot)} "
                                        f"(year ended {years[YKEY[slot]]:%d-%b-%Y}). Check that this is the right file for this year.")
                         load_tb(slot, f)
                     except Exception as e:
@@ -574,7 +595,7 @@ with docs_tab:
 # ---------------------------------------------------------------- 3. mapping
 with tabs[2]:
     if not ready:
-        st.info("Upload all three trial balances first.")
+        st.info("Upload all the trial balances first.")
     else:
         st.write("Each ledger is mapped to a note line (Masters). The 'if Dr' / 'if Cr' column is used depending on the balance, "
                  "so debit creditors and credit debtors are reclassified automatically. Edit any row, then press Save mapping.")
@@ -590,7 +611,7 @@ with tabs[2]:
                     if ov:
                         d, c = ov["dr"], ov["cr"]
                     rows[k] = {"key": k, "Primary group": x["primary"], "Group": x["parent"], "Ledger": x["name"],
-                               "FY26": 0.0, "FY25": 0.0, "FY24": 0.0, "Master if Dr": d, "Master if Cr": c}
+                               **{s_: 0.0 for s_, _ in SLOTS}, "Master if Dr": d, "Master if Cr": c}
                 rows[k][slot] = round(x["v"][3], 2)
         df = pd.DataFrame(list(rows.values()))
         extra = sorted({v for v in list(df["Master if Dr"]) + list(df["Master if Cr"]) if str(v).startswith(mapping.DIRECTOR_PREFIX)})
@@ -603,13 +624,11 @@ with tabs[2]:
         if search: view = view[view["Ledger"].str.contains(search, case=False)]
         edited = st.data_editor(
             view, width="stretch", height=520, hide_index=True, key="mapedit",
-            disabled=["key", "Primary group", "Group", "Ledger", "FY26", "FY25", "FY24"],
+            disabled=["key", "Primary group", "Group", "Ledger"] + [s_ for s_, _ in SLOTS],
             column_config={"key": None,
                            "Master if Dr": st.column_config.SelectboxColumn(options=options, width="large"),
                            "Master if Cr": st.column_config.SelectboxColumn(options=options, width="large"),
-                           "FY26": st.column_config.NumberColumn(fy_label(years["d26"]) + " closing (Dr+/Cr-)", format="%.2f"),
-                           "FY25": st.column_config.NumberColumn(fy_label(years["d25"]) + " closing", format="%.2f"),
-                           "FY24": st.column_config.NumberColumn(fy_label(years["d24"]) + " closing", format="%.2f")})
+                           **{s_: st.column_config.NumberColumn(plabel(s_) + " closing (Dr+/Cr-)", format="%.2f") for s_, _ in SLOTS}})
         b1, b2, b3 = st.columns(3)
         if b1.button("Save mapping", type="primary"):
             for _, rw in edited.iterrows():
@@ -627,8 +646,13 @@ with tabs[2]:
 # ---------------------------------------------------------------- 4. shareholders & ageing
 with tabs[3]:
     st.subheader("Register of members (number of shares)")
-    sh_cols = {"name": "Name", "s26": fy_label(years["d26"]) + " end", "s25": fy_label(years["d25"]) + " end", "s24": fy_label(years["d24"]) + " end", "promoter": "Promoter"}
+    SHK = {"FYS": "sS", "FY26": "s26", "FY25": "s25", "FY24": "s24"}
+    sh_cols = {"name": "Name", **{SHK[s_]: plabel(s_) + " end" for s_, _ in SLOTS}, "promoter": "Promoter"}
     sh_df = pd.DataFrame(P("shareholders", [{"name": "", "s26": 0, "s25": 0, "s24": 0, "promoter": False}]))
+    for k_ in sh_cols:
+        if k_ not in sh_df.columns:
+            sh_df[k_] = 0
+    sh_df = sh_df[list(sh_cols)]
     sh_df = st.data_editor(sh_df, num_rows="dynamic", width="stretch", key="sh",
                            column_config={k: st.column_config.Column(v) for k, v in sh_cols.items()} | {"promoter": st.column_config.CheckboxColumn("Promoter")})
     ss.project["shareholders"] = sh_df.fillna(0).to_dict("records")
@@ -637,7 +661,7 @@ with tabs[3]:
         st.subheader(title + " (Rs)")
         store = P(key, {})
         out = {}
-        for dk in ["d26", "d25", "d24"]:
+        for dk in DKEYS:
             base = store.get(dk, [])
             data = [[(base[j][i] if j < len(base) and i < len(base[j]) else 0) for i in range(len(buckets))] for j in range(4)]
             df_ = pd.DataFrame(data, columns=buckets, index=rows_lbl)
@@ -688,6 +712,183 @@ with tabs[4]:
     ss.entries = entries
     st.caption(f"{len(entries)} balanced entr{'y' if len(entries) == 1 else 'ies'} will be posted to 'Adj Entry RFS'.")
 
+# ---------------------------------------------------------------- 7. restatement inputs
+RST = ss.project.setdefault("restatement", {})
+CHRON_SLOTS = [s_ for s_, _ in reversed(SLOTS)]                  # earliest first
+OPEN_KEY = "d23"
+years_open = years["d24"].replace(year=years["d24"].year - 1)
+
+
+def _per_table(key, label, keys, lab_fn):
+    """One-column editable table (Rs) keyed by date keys; stored in RST[key]."""
+    store = RST.setdefault(key, {})
+    df_ = pd.DataFrame({"Period / date": [lab_fn(k) for k in keys], label: [store.get(k) for k in keys]})
+    e = st.data_editor(df_, hide_index=True, width="stretch", key="rst_" + key, disabled=["Period / date"],
+                       column_config={label: st.column_config.NumberColumn(label, format="%.2f")})
+    RST[key] = {k: (None if pd.isna(v) else float(v)) for k, v in zip(keys, e[label])}
+
+
+def date_lab(k):
+    return f"As at {years_open:%d-%b-%Y} (opening)" if k == OPEN_KEY else (f"{'Period' if k == 'dS' else 'Year'} ended {years[k]:%d-%b-%Y}")
+
+
+def key_for_date(d):
+    """Date key whose date equals d (period end / opening date)."""
+    if d == years_open:
+        return OPEN_KEY
+    return next((k for k in DKEYS if years[k] == d), None)
+
+
+with rst_tab:
+    st.write("Inputs for the standard restatement adjustments. Each section posts formula-linked entries to 'Adj Entry RFS' (with deferred tax "
+             "where applicable) and adds its working sheet to the workbook. Values can be read from the supporting documents and edited here; "
+             "leave a section empty to skip it.")
+    per_keys = [YKEY[s_] for s_ in CHRON_SLOTS]
+
+    with st.expander("1. Fixed asset register - depreciation restated as per Schedule II (WDV)", expanded=bool(RST.get("fa_assets"))):
+        fu = st.file_uploader("Fixed asset register (Excel, CSV, PDF, Word)", type=FILE_TYPES, key="fa_up")
+        cand = [k for k in ss.docs if re.search(r"fixed asset|fa[ _-]?(details|register)|asset register|\bfar\b", k, re.I)]
+        pick = st.selectbox("...or read it from the supporting documents", ["-"] + cand, key="fa_pick")
+        src_path = None
+        if fu is not None and ss.get("_fa_loaded") != fu.name + str(fu.size):
+            src_path = os.path.join(ss.workdir, "fa_" + fu.name)
+            with open(src_path, "wb") as fh:
+                fh.write(fu.getbuffer())
+            ss._fa_loaded = fu.name + str(fu.size)
+        elif pick != "-" and ss.get("_fa_loaded") != pick:
+            src_path = ss.docs[pick]["path"]; ss._fa_loaded = pick
+        if src_path:
+            with st.spinner("Reading the register..."):
+                try:
+                    RST["fa_assets"] = restate.read_fa_register(src_path, ss.workdir)
+                    st.success(f"{len(RST['fa_assets'])} assets read.")
+                except Exception as e:
+                    st.error(f"Could not read the register: {e}")
+        assets = RST.get("fa_assets") or []
+        if assets:
+            fdf = pd.DataFrame(assets)
+            st.caption("Class mapping - register classification to the PPE note line (applies to all assets of that classification):")
+            cm = fdf.groupby("source_class", dropna=False).agg(class_=("class", "first"), assets=("cost", "size"), cost=("cost", "sum")).reset_index()
+            cm.columns = ["Register classification", "Note line", "Assets", "Cost (Rs)"]
+            cm_e = st.data_editor(cm, hide_index=True, width="stretch", key="fa_cm", disabled=["Register classification", "Assets", "Cost (Rs)"],
+                                  column_config={"Note line": st.column_config.SelectboxColumn(options=restate.FA_CLASSES, required=True),
+                                                 "Cost (Rs)": st.column_config.NumberColumn(format="%.2f")})
+            cmap = dict(zip(cm_e["Register classification"], cm_e["Note line"]))
+            fdf["class"] = [cmap.get(sc, c) for sc, c in zip(fdf["source_class"], fdf["class"])]
+            for c_ in ("date", "del_date"):
+                fdf[c_] = pd.to_datetime(fdf[c_], errors="coerce").dt.date
+            st.caption("Assets - enter the date of deletion and sale value for assets sold / discarded (the register often has no such column):")
+            fe = st.data_editor(fdf, num_rows="dynamic", width="stretch", height=320, key="fa_grid", column_config={
+                "name": "Asset", "source_class": "Register classification", "class": st.column_config.SelectboxColumn("Note line", options=restate.FA_CLASSES),
+                "date": st.column_config.DateColumn("Date put to use", format="DD-MM-YYYY"), "cost": st.column_config.NumberColumn("Cost (Rs)", format="%.2f"),
+                "rate": st.column_config.NumberColumn("WDV rate", format="%.4f", help="Blank: from useful life (5% residual value)"),
+                "life": st.column_config.NumberColumn("Useful life (yrs)"),
+                "del_date": st.column_config.DateColumn("Date of deletion", format="DD-MM-YYYY"), "sale": st.column_config.NumberColumn("Sale value (Rs)", format="%.2f")})
+            RST["fa_assets"] = [{**r, "date": r["date"].isoformat() if hasattr(r["date"], "isoformat") else None,
+                                 "del_date": r["del_date"].isoformat() if hasattr(r.get("del_date"), "isoformat") else None}
+                                for r in fe.where(pd.notna(fe), None).to_dict("records") if r.get("cost")]
+            st.caption(f"{len(RST['fa_assets'])} assets, cost Rs {sum(float(a['cost'] or 0) for a in RST['fa_assets']):,.2f}. "
+                       "Assets without a rate use 1 - 0.05^(1/useful life); without both, the Schedule II life of the class.")
+            if ready:
+                book_cls = sorted({m[0] for s_, _ in SLOTS for x in ss.tb[s_] if x["inc"] for m in [mapping.master_for(x, 3, ss.overrides)]
+                                   if m and m[0] in restate.FA_CLASSES})
+                missing = [c_ for c_ in book_cls if c_ not in {a["class"] for a in RST["fa_assets"]}]
+                if missing:
+                    st.warning("Note lines with book balances but no asset in the register: " + ", ".join(missing) +
+                               ". They are left as per books (not restated). Check the class mapping or the TB mapping.")
+            st.caption("Book entries that changed PPE directly through reserves (e.g. an alignment with the register passed in the books), Rs - "
+                       "increase in PPE positive:")
+            _per_table("fa_direct", "PPE through reserves in books (Rs)", per_keys, date_lab)
+            if st.button("Clear the register", key="fa_clear"):
+                RST["fa_assets"] = []; ss._fa_loaded = None; st.rerun()
+
+    with st.expander("2. Gratuity - provision restated to the actuarial valuation", expanded=bool((RST.get("dbo") or {}) and any((RST.get("dbo") or {}).values()))):
+        if st.button("Read from actuarial reports in supporting documents", key="g_read"):
+            found = 0
+            for k_, d_ in ss.docs.items():
+                for iso, amt in restate.read_gratuity(d_.get("text", "")).items():
+                    kk = key_for_date(dt.date.fromisoformat(iso))
+                    if kk:
+                        RST.setdefault("dbo", {})[kk] = amt; found += 1
+            (st.success if found else st.info)(f"{found} valuation(s) read." if found else "No actuarial valuation found - enter the figures below.")
+        st.caption("Defined benefit obligation as per the actuarial valuation at each date (Rs). All dates are needed, including the opening date.")
+        _per_table("dbo", "Obligation (Rs)", [OPEN_KEY] + per_keys, date_lab)
+        st.caption("Gratuity charged directly to reserves in the books during the period (Rs) - reclassified to the Statement of Profit and Loss:")
+        _per_table("gdir", "Charged to reserves in books (Rs)", per_keys, date_lab)
+
+    with st.expander("3. MSME interest - Section 16 of the MSMED Act", expanded=bool(any((RST.get("msme") or {}).values()))):
+        if st.button("Read from MSME interest computations in supporting documents", key="m_read"):
+            found = 0
+            for k_, d_ in ss.docs.items():
+                if re.search(r"msme|micro|interest", k_, re.I) and d_.get("path") and d_["path"].lower().endswith((".xlsx", ".xlsm", ".xls", ".csv")):
+                    amt, end = restate.read_msme_interest(d_["path"], ss.workdir)
+                    kk = key_for_date(end) if end else None
+                    if amt is not None and kk:
+                        RST.setdefault("msme", {})[kk] = amt; found += 1
+            (st.success if found else st.info)(f"{found} computation(s) read." if found else "No MSME computation found - enter the figures below.")
+        st.caption("Interest on delayed payments to micro and small enterprises for each period (Rs). The entry posts the difference from the "
+                   "interest already booked. Not deductible (Section 23), so no deferred tax.")
+        _per_table("msme", "MSME interest (Rs)", per_keys, date_lab)
+
+    with st.expander("4. Current tax - as per return of income / computation", expanded=bool(any((RST.get("tax") or {}).values()))):
+        if st.button("Read from ITR acknowledgements in supporting documents", key="t_read"):
+            found = 0
+            for k_, d_ in ss.docs.items():
+                if re.search(r"itr|return|acknow|computation", k_, re.I):
+                    amt, end = restate.read_tax(d_.get("text", ""))
+                    kk = key_for_date(end) if end else None
+                    if amt is not None and kk:
+                        RST.setdefault("tax", {})[kk] = amt; found += 1
+            (st.success if found else st.info)(f"{found} return(s) read." if found else "No return found - enter the figures below.")
+        st.caption("Current tax as per the return / computation (Rs); blank = no adjustment. The entry posts the difference from the tax provided in the books.")
+        _per_table("tax", "Tax as per return (Rs)", [k for k in per_keys if k != "dS"], date_lab)
+        if stub_end:
+            RST["tax_stub_computed"] = st.checkbox("Stub period: provide current tax on the restated taxable income ('Tax Computation' sheet)",
+                                                   value=bool(RST.get("tax_stub_computed")), key="t_stub")
+
+    with st.expander("5. Borrowing terms - from sanction letters", expanded=bool(RST.get("borrowings"))):
+        if st.button("Read from sanction letters in supporting documents", key="b_read"):
+            got = [restate.read_sanction(d_.get("text", ""), k_) for k_, d_ in ss.docs.items() if re.search(r"sanction", k_ + " " + d_.get("text", "")[:2000], re.I)]
+            RST["borrowings"] = (RST.get("borrowings") or []) + got
+            (st.success if got else st.info)(f"{len(got)} sanction letter(s) read." if got else "No sanction letter found - add rows below.")
+        led_opts = [""]
+        if ready:
+            BORR = {"Term loans from banks and NBFCs (secured)", "Overdraft facilities from banks (secured)", "Bill discounting and channel finance (secured)"}
+            led_opts += sorted({x["name"] for s_, _ in SLOTS for x in ss.tb[s_] if x["inc"]
+                                for m in [mapping.master_for(x, 3, ss.overrides)] if m and (m[0] in BORR or m[0].startswith(mapping.DIRECTOR_PREFIX))})
+        bdf = pd.DataFrame(RST.get("borrowings") or [], columns=["lender", "facility", "sanctioned", "rate", "tenure", "security", "guarantee", "ledger"])
+        be = st.data_editor(bdf, num_rows="dynamic", width="stretch", key="b_grid", column_config={
+            "lender": "Lender", "facility": "Nature of facility", "sanctioned": st.column_config.NumberColumn("Sanctioned (Rs)", format="%.2f"),
+            "rate": "Rate of interest", "tenure": "Repayment / tenure", "security": st.column_config.TextColumn("Security", width="large"),
+            "guarantee": "Guarantee", "ledger": st.column_config.SelectboxColumn("TB ledger (outstanding)", options=led_opts, width="medium")})
+        RST["borrowings"] = [r for r in be.where(pd.notna(be), None).to_dict("records") if r.get("lender") or r.get("facility")]
+
+
+def restatement_cfg():
+    """Restatement inputs from the tab -> builder cfg (dates as date objects, tax keyed by period)."""
+    out = {}
+    if RST.get("fa_assets"):
+        def d_(v):
+            return dt.date.fromisoformat(v) if isinstance(v, str) and v else None
+        out["fa"] = {"assets": [{**a, "date": d_(a.get("date")), "del_date": d_(a.get("del_date"))} for a in RST["fa_assets"] if d_(a.get("date"))],
+                     "direct": {k: v for k, v in (RST.get("fa_direct") or {}).items() if v}}
+    dbo = RST.get("dbo") or {}
+    need = [OPEN_KEY] + [YKEY[s_] for s_ in CHRON_SLOTS]
+    if all(dbo.get(k) not in (None, "") for k in need):
+        out["gratuity"] = {"dbo": {k: dbo[k] for k in need}, "direct": {k: v for k, v in (RST.get("gdir") or {}).items() if v}}
+    if any((RST.get("msme") or {}).values()):
+        out["msme"] = {k: v for k, v in RST["msme"].items() if v not in (None, "")}
+    tx = {s_: (RST.get("tax") or {}).get(YKEY[s_]) for s_ in CHRON_SLOTS if s_ != "FYS"}
+    tx = {k: v for k, v in tx.items() if v not in (None, "")}
+    if stub_end and RST.get("tax_stub_computed"):
+        tx["FYS"] = "computed"
+    if tx:
+        out["tax"] = tx
+    if RST.get("borrowings"):
+        out["borrowings"] = RST["borrowings"]
+    return out
+
+
 # ---------------------------------------------------------------- 6. generate
 with tabs[5]:
     st.download_button("Save project (.json) for later", json.dumps({"project": ss.project, "overrides": ss.overrides, "regcheck": ss.regcheck,
@@ -695,7 +896,7 @@ with tabs[5]:
                                   indent=1, default=str),
                        f"{(name or 'rfs').replace(' ', '_')}_project.json")
     problems = []
-    if not ready: problems.append("Upload all three trial balances.")
+    if not ready: problems.append("Upload all the trial balances" + (" (including the stub period)." if stub_end else "."))
     if not name or not cin: problems.append("Company name and CIN are required.")
     if ready:
         known = set(mapping.MASTER_INFO) | {mapping.EXCLUDE}
@@ -703,6 +904,9 @@ with tabs[5]:
         if bad: problems.append("Unknown masters in mapping: " + ", ".join(sorted(bad)))
     for p_ in problems:
         st.warning(p_)
+    dbo_ = RST.get("dbo") or {}
+    if any(v not in (None, "") for v in dbo_.values()) and "gratuity" not in restatement_cfg():
+        st.info("Gratuity restatement is skipped: enter the obligation for every date (including the opening date) in tab 7.")
     FORMATS = {"Excel (.xlsx)": "xlsx", "Word (.docx)": "docx", "Word 97-2003 (.doc)": "doc", "PowerPoint (.pptx)": "pptx", "HTML (.html)": "html"}
     engine = exporters.recalc_engine()
     chosen = st.multiselect("Output formats", list(FORMATS), default=["Excel (.xlsx)"])
@@ -713,16 +917,21 @@ with tabs[5]:
         st.warning(problems[-1])
     if st.button("Generate RFS", type="primary", disabled=bool(problems) or not chosen):
         cfg = dict(ss.project)
-        cfg["years"] = years
+        cfg["years"] = {k: v for k, v in years.items() if k != "dS"}
+        if stub_end:
+            cfg["stub"] = {"end": stub_end, "closing_stock": stub_stock}
+        cfg["restatement"] = restatement_cfg()
         cfg["adjustments"] = getattr(ss, "entries", [])
         cfg["directors"] = [d for d in cfg.get("directors", []) if d.get("name")]
         cfg["shareholders"] = [h for h in cfg.get("shareholders", []) if h.get("name")]
         run_dir = tempfile.mkdtemp(dir=ss.workdir)
-        out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{fy_label(years['d26'])[3:]}.xlsx")
+        upto = f"{stub_end:%b-%y}" if stub_end else fy_label(years['d26'])[3:]
+        out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{upto}.xlsx")
         with st.spinner("Building workbook..."):
-            builder.build(cfg, ss.tb, ss.tbfile, out, ss.overrides)
+            keys_ = [s_ for s_, _ in SLOTS]
+            builder.build(cfg, {k: ss.tb[k] for k in keys_}, {k: ss.tbfile[k] for k in keys_}, out, ss.overrides)
             exporters.add_reference_sheet(out, ss.regcheck, ss.docs,
-                                          {fy_label(years[YKEY[s_]]): ss.get("tbsrc_" + s_, os.path.basename(ss.tbfile.get(s_, ""))) for s_, _ in SLOTS})
+                                          {plabel(s_): ss.get("tbsrc_" + s_, os.path.basename(ss.tbfile.get(s_, ""))) for s_, _ in SLOTS})
         with st.spinner("Preparing output files..."):
             try:
                 ss.outputs = exporters.export_all(out, [FORMATS[c] for c in chosen], os.path.join(run_dir, "out"), name)
@@ -735,20 +944,21 @@ with tabs[5]:
             import openpyxl
             v = openpyxl.load_workbook(calc, data_only=True)
             bs, pl = v["BS_1"], v["PL_2"]
+            pc = "DEFG"[:len(SLOTS)]
             rows_ = []
             for r in range(9, 60):
                 lab = bs[f"B{r}"].value
                 if lab and isinstance(bs[f"D{r}"].value, (int, float)) and "Total" in str(lab):
-                    rows_.append([lab, bs[f"D{r}"].value, bs[f"E{r}"].value, bs[f"F{r}"].value])
+                    rows_.append([lab] + [bs[f"{c}{r}"].value for c in pc])
             for r in range(8, 32):
                 lab = pl[f"B{r}"].value
                 if lab and isinstance(pl[f"D{r}"].value, (int, float)) and any(k in str(lab) for k in ("Revenue", "Profit", "Total")):
-                    rows_.append([lab, pl[f"D{r}"].value, pl[f"E{r}"].value, pl[f"F{r}"].value])
-            ss.preview = (rows_, [bs[f"{c}1"].value for c in "DEF"])
+                    rows_.append([lab] + [pl[f"{c}{r}"].value for c in pc])
+            ss.preview = (rows_, [bs[f"{c}1"].value for c in pc], [plabel(s_) for s_, _ in SLOTS])
 
     if ss.get("preview"):
-        rows_, diff = ss.preview
-        cols_ = ["Line (Rs. lakhs)", fy_label(years["d26"]), fy_label(years["d25"]), fy_label(years["d24"])]
+        rows_, diff, heads_ = ss.preview
+        cols_ = ["Line (Rs. lakhs)"] + heads_
         st.dataframe(pd.DataFrame(rows_, columns=cols_), width="stretch", hide_index=True,
                      column_config={c: st.column_config.NumberColumn(format="%.2f") for c in cols_[1:]})
         (st.success if all(abs(d or 0) < 0.01 for d in diff) else st.error)(f"Balance sheet difference: {diff}")
