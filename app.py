@@ -13,7 +13,25 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from rfs import tally, builder, mapping, exporters, docreader, regulatory
+from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify
+
+
+def _reload_if_updated():
+    """After a git pull while the app is running, Streamlit re-runs app.py but keeps the old rfs modules in memory:
+    reload any module whose file changed since it was loaded."""
+    import importlib
+    for mod in (classify, mapping, tally, docreader, regulatory, builder, exporters):     # dependencies first
+        try:
+            m = os.path.getmtime(mod.__file__)
+        except OSError:
+            continue
+        loaded = getattr(mod, "_loaded_mtime", None)
+        if loaded is not None and m != loaded:
+            importlib.reload(mod)
+        mod._loaded_mtime = m
+
+
+_reload_if_updated()
 
 st.set_page_config(page_title="RFS Generator", layout="wide")
 SLOTS = [("FY26", "Latest year"), ("FY25", "Previous year"), ("FY24", "Earliest year")]
