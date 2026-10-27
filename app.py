@@ -54,11 +54,23 @@ with st.sidebar:
             ss._loaded = up.name + str(up.size)
             quick_msg.success(f"Project {up.name} loaded. Upload the trial balances again.")
     st.markdown("**Steps**\n1. ICDR & DRHP check\n2. Company\n3. Trial balances\n4. Supporting documents\n5. Mapping\n6. Shareholders & ageing\n7. Adjustments\n8. Generate")
+    if not ss.get("_settings_loaded"):
+        regulatory.load_settings()
+        ss._settings_loaded = True
     with st.expander("Settings - source URLs"):
         for k in list(regulatory.SOURCES):
             regulatory.SOURCES[k] = st.text_input(k, regulatory.SOURCES[k], key="url_" + k)
         for k in list(regulatory.EXCHANGE_SOURCES):
             regulatory.EXCHANGE_SOURCES[k] = st.text_input(k, regulatory.EXCHANGE_SOURCES[k], key="url_" + k)
+        for k in list(regulatory.NSE_DATA):
+            regulatory.NSE_DATA[k] = st.text_input(k, regulatory.NSE_DATA[k], key="url_" + k, help=regulatory.NSE_HOW_TO,
+                                                   placeholder="https://www.nseindia.com/api/...")
+        if st.button("Save settings", help="Remembered on this PC for next time"):
+            try:
+                regulatory.save_settings()
+                st.success("Saved.")
+            except Exception as e:
+                st.error(f"Could not save: {e}")
 
 TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. Supporting documents", "5. Mapping review",
                 "6. Shareholders & ageing", "7. Adjustments", "8. Generate"])
@@ -278,8 +290,11 @@ with reg_tab:
             st.info(f"No DRHP / RHP filings found for {per}.")
         for e in of["errors"]:
             src = e.split(":")[0]
-            if src.startswith("NSE") or src.startswith("BSE"):
-                st.warning(f"Could not read {src}. Exchanges often refuse automated access. Open the page (Source links below), "
+            if src.startswith("NSE") and not next(iter(regulatory.NSE_DATA.values()), ""):
+                st.warning("NSE: set the NSE data address once in the sidebar (Settings - source URLs) so the app can read NSE "
+                           "directly. How to find it: " + regulatory.NSE_HOW_TO + "  Or use *Add a list downloaded from NSE / BSE* below.")
+            elif src.startswith("NSE") or src.startswith("BSE"):
+                st.warning(f"Could not read {src}. Check the address in Settings - source URLs, or open the page (Source links below), "
                            "use its Download (.csv / Excel) option, and add the file under *Add a list downloaded from NSE / BSE*.")
             else:
                 st.warning(f"Could not read {src} - no internet access or the site refused the request. Open the source links below manually.")

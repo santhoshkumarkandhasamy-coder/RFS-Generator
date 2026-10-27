@@ -28,6 +28,12 @@ EXCHANGE_SOURCES = {
     "BSE - draft offer documents (Main board)": "https://www.bseindia.com/markets/PublicIssues/DraftOfferDocument.aspx",
     "BSE SME - draft offer documents": "https://www.bsesme.com/PublicIssues/SMEIPODRHP.aspx",
 }
+# The NSE offer documents page fills its table from an NSE data address (JSON). NSE does not publish it, so it is a
+# setting: copy it once from the browser (see NSE_HOW_TO) - {from} / {to} are replaced by dates (dd-mm-yyyy) for a month.
+NSE_DATA = {"NSE data address (JSON behind the offer documents page)": ""}
+NSE_HOW_TO = ("1. Open the NSE offer documents page in Chrome or Edge.  2. Press F12 and choose the Network tab, then Fetch/XHR.  "
+              "3. Reload the page (F5).  4. Click the request whose Response shows the list of companies; under Headers copy the "
+              "Request URL (it starts with https://www.nseindia.com/api/).  5. Paste it in Settings - source URLs and press Save settings.")
 MANUAL_LINKS = {
     "SEBI ICDR Regulations, 2018 (latest consolidated)": "https://www.sebi.gov.in/legal/regulations.html",
     "SEBI - Filings: public issues": "https://www.sebi.gov.in/filings/public-issues.html",
@@ -337,20 +343,75 @@ def _browser_capture(url, timeout_ms=45000):
     return html_text, bodies
 
 
-def exchange_listing(name, url=None):
+def _nse_session(page_url):
+    import requests
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+                         "Accept-Language": "en-IN,en;q=0.9"})
+    sess.get("https://www.nseindia.com", timeout=20)    # NSE sets its session cookies on the home page and the page itself
+    sess.get(page_url, timeout=20)
+    return sess
+
+
+def nse_data(data_url, page_url=None, start=None, end=None):
+    """Rows from the NSE data address the offer documents page uses (JSON, or a CSV download link)."""
+    page_url = page_url or EXCHANGE_SOURCES["NSE - offer documents (Main board and Emerge)"]
+    if start and end:
+        f, t = start.strftime("%d-%m-%Y"), end.strftime("%d-%m-%Y")
+        data_url = data_url.replace("{from}", f).replace("{to}", t)
+        data_url = re.sub(r"(from_?date=)[^&]*", r"\g<1>" + f, data_url, flags=re.I)
+        data_url = re.sub(r"(to_?date=)[^&]*", r"\g<1>" + t, data_url, flags=re.I)
+    else:
+        data_url = data_url.replace("{from}", "").replace("{to}", "")
+    sess = _nse_session(page_url)
+    r = sess.get(data_url, timeout=30, headers={"Referer": page_url, "Accept": "application/json, text/csv, */*"})
+    r.raise_for_status()
+    base = "https://www.nseindia.com"
+    ctype = r.headers.get("content-type", "")
+    if "json" in ctype or r.text.lstrip()[:1] in "[{":
+        rows = _json_rows(r.json(), base)
+    else:                                               # CSV download link
+        import csv, io
+        table = [row for row in csv.reader(io.StringIO(r.content.decode("utf-8-sig", "replace"))) if any(c.strip() for c in row)]
+        rows = _table_rows(table)
+    if not rows:
+        raise RuntimeError("the NSE data address answered but contained no list of documents - check the address in Settings")
+    return rows
+
+
+def _table_rows(t):
+    """Rows of a downloaded table (header + rows) -> {date, title, url, text}."""
+    out = []
+    head = [c.lower() for c in t[0]] if t else []
+    ncol = next((k for pat in ("company", "issuer", "name", "symbol") for k, h in enumerate(head) if pat in h), None)
+    for r in t[1:]:
+        d = next((_parse_date(c) for c in r if _parse_date(c)), None)
+        name = (r[ncol] if ncol is not None and ncol < len(r) else "") or next((c for c in r if re.search(r"limited|ltd", c, re.I)), "")
+        if not d or not name:
+            continue
+        link = next((c for c in r if c.startswith("http")), "")
+        out.append({"date": d, "title": name, "url": link, "text": " | ".join(r)})
+    return out
+
+
+def exchange_listing(name, url=None, start=None, end=None):
     """Offer documents listed on an exchange page. Tries a plain request first, then a headless browser."""
     url = url or EXCHANGE_SOURCES[name]
     base = re.match(r"https?://[^/]+", url).group(0)
     rows, err = [], None
+    data_url = next(iter(NSE_DATA.values()), "") if "nse" in name.lower() else ""
+    if data_url:
+        rows = nse_data(data_url, url, start, end)      # errors here are reported as they are (the address is the user's setting)
     try:
         import requests
         sess = requests.Session()
         sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
                              "Accept-Language": "en-US,en;q=0.9"})
-        sess.get(base, timeout=20)                 # exchanges set cookies on the home page first
-        r = sess.get(url, timeout=25)
-        r.raise_for_status()
-        rows = _html_rows(r.text, base)
+        if not rows:
+            sess.get(base, timeout=20)                 # exchanges set cookies on the home page first
+            r = sess.get(url, timeout=25)
+            r.raise_for_status()
+            rows = _html_rows(r.text, base)
     except Exception as e:
         err = e
     if not rows:
@@ -394,7 +455,7 @@ def all_offer_documents(sources=("SEBI", "NSE", "BSE"), month=None, urls=None, e
         if not any(src in name for src in sources):
             continue
         try:
-            for it in exchange_listing(name, u):
+            for it in exchange_listing(name, u, start, end):
                 if start and not (it["date"] and start <= it["date"] <= end):
                     continue
                 if it["source"] in ("DRHP", "RHP", "DRHP addendum", "Offer document", "Prospectus", "Addendum"):
@@ -427,15 +488,7 @@ def import_listing(path, exchange, work_dir=None):
     else:
         from .docreader import extract_tables
         for t in extract_tables(path, work_dir):
-            head = [c.lower() for c in t[0]] if t else []
-            ncol = next((k for pat in ("company", "issuer", "name", "symbol") for k, h in enumerate(head) if pat in h), None)
-            for r in t[1:]:
-                d = next((_parse_date(c) for c in r if _parse_date(c)), None)
-                name = (r[ncol] if ncol is not None and ncol < len(r) else "") or next((c for c in r if re.search(r"limited|ltd", c, re.I)), "")
-                if not d or not name:
-                    continue
-                link = next((c for c in r if c.startswith("http")), "")
-                rows.append({"date": d, "title": name, "url": link, "text": " | ".join(r)})
+            rows += _table_rows(t)
     out = []
     for it in rows:
         it["source"] = _doc_type(it.get("text", "") + " " + it["title"] + " " + it["url"])
@@ -583,6 +636,28 @@ def _cache_path():
     d = os.path.join(os.path.expanduser("~"), ".rfs_generator")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "offer_locations.json")
+
+
+def _settings_path():
+    return os.path.join(os.path.dirname(_cache_path()), "settings.json")
+
+
+def load_settings():
+    """Source addresses saved on this PC (Settings - source URLs) override the defaults."""
+    try:
+        with open(_settings_path(), encoding="utf-8") as fh:
+            saved = json.load(fh)
+    except Exception:
+        return
+    for d in (SOURCES, EXCHANGE_SOURCES, NSE_DATA):
+        for k in d:
+            if saved.get(k):
+                d[k] = saved[k]
+
+
+def save_settings():
+    with open(_settings_path(), "w", encoding="utf-8") as fh:
+        json.dump({**SOURCES, **EXCHANGE_SOURCES, **NSE_DATA}, fh, indent=1)
 
 
 def load_location_cache():
