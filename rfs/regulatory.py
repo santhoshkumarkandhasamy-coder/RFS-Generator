@@ -28,12 +28,12 @@ EXCHANGE_SOURCES = {
     "BSE - draft offer documents (Main board)": "https://www.bseindia.com/markets/PublicIssues/DraftOfferDocument.aspx",
     "BSE SME - draft offer documents": "https://www.bsesme.com/PublicIssues/SMEIPODRHP.aspx",
 }
-# The NSE offer documents page fills its table from an NSE data address (JSON). NSE does not publish it, so it is a
-# setting: copy it once from the browser (see NSE_HOW_TO) - {from} / {to} are replaced by dates (dd-mm-yyyy) for a month.
-NSE_DATA = {"NSE data address (JSON behind the offer documents page)": ""}
-NSE_HOW_TO = ("1. Open the NSE offer documents page in Chrome or Edge.  2. Press F12 and choose the Network tab, then Fetch/XHR.  "
-              "3. Reload the page (F5).  4. Click the request whose Response shows the list of companies; under Headers copy the "
-              "Request URL (it starts with https://www.nseindia.com/api/).  5. Paste it in Settings - source URLs and press Save settings.")
+# Exchange pages fill their tables from a data address (JSON) the exchanges do not publish, so it is a setting per page:
+# copy it once from the browser (see DATA_HOW_TO). Dates in it (from / to) are replaced for a month; {from} / {to} also work.
+DATA_ADDRESSES = {name: "" for name in EXCHANGE_SOURCES}
+DATA_HOW_TO = ("1. Open the exchange page (Source links) in Chrome or Edge.  2. Press F12, choose Network, then Fetch/XHR.  "
+               "3. Press F5.  4. Click each row in the Name column and look at Preview: the right one shows the list of companies.  "
+               "5. Right-click that row > Copy > Copy URL.  6. Paste it here and press Save settings.")
 MANUAL_LINKS = {
     "SEBI ICDR Regulations, 2018 (latest consolidated)": "https://www.sebi.gov.in/legal/regulations.html",
     "SEBI - Filings: public issues": "https://www.sebi.gov.in/filings/public-issues.html",
@@ -343,30 +343,45 @@ def _browser_capture(url, timeout_ms=45000):
     return html_text, bodies
 
 
-def _nse_session(page_url):
+def _exchange_session(page_url):
     import requests
     sess = requests.Session()
     sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
                          "Accept-Language": "en-IN,en;q=0.9"})
-    sess.get("https://www.nseindia.com", timeout=20)    # NSE sets its session cookies on the home page and the page itself
+    site = re.match(r"https?://[^/]+", page_url).group(0)
+    sess.get(site, timeout=20)          # exchanges set their session cookies on the home page and the page itself
     sess.get(page_url, timeout=20)
     return sess
 
 
-def nse_data(data_url, page_url=None, start=None, end=None):
-    """Rows from the NSE data address the offer documents page uses (JSON, or a CSV download link)."""
-    page_url = page_url or EXCHANGE_SOURCES["NSE - offer documents (Main board and Emerge)"]
-    if start and end:
-        f, t = start.strftime("%d-%m-%Y"), end.strftime("%d-%m-%Y")
-        data_url = data_url.replace("{from}", f).replace("{to}", t)
-        data_url = re.sub(r"(from_?date=)[^&]*", r"\g<1>" + f, data_url, flags=re.I)
-        data_url = re.sub(r"(to_?date=)[^&]*", r"\g<1>" + t, data_url, flags=re.I)
-    else:
-        data_url = data_url.replace("{from}", "").replace("{to}", "")
-    sess = _nse_session(page_url)
+_DATE_FMTS = [(r"^\d{8}$", "%Y%m%d"), (r"^\d{2}-\d{2}-\d{4}$", "%d-%m-%Y"), (r"^\d{2}/\d{2}/\d{4}$", "%d/%m/%Y"),
+              (r"^\d{4}-\d{2}-\d{2}$", "%Y-%m-%d"), (r"^\d{2}-[A-Za-z]{3}-\d{4}$", "%d-%b-%Y")]
+
+
+def set_period(data_url, start, end):
+    """Puts a month into a copied data address: {from}/{to}, or any from/to date parameter, keeping its date format."""
+    from urllib.parse import unquote
+    if not (start and end):
+        return data_url.replace("{from}", "").replace("{to}", "")
+    data_url = data_url.replace("{from}", start.strftime("%d-%m-%Y")).replace("{to}", end.strftime("%d-%m-%Y"))
+
+    def sub(m):
+        key, val = m.group(1), unquote(m.group(2))
+        fmt = next((f for rx, f in _DATE_FMTS if re.match(rx, val)), None)
+        if not fmt:
+            return m.group(0)
+        d = end if re.search(r"to|end|till|upto", key, re.I) else start
+        return f"{key}={d.strftime(fmt)}"
+    return re.sub(r"([A-Za-z_]*(?:from|prev|start|to|end)[A-Za-z_]*)=([^&]*)", sub, data_url, flags=re.I)
+
+
+def exchange_data(data_url, page_url, start=None, end=None):
+    """Rows from the data address behind an exchange page (JSON, or a CSV download link)."""
+    data_url = set_period(data_url, start, end)
+    sess = _exchange_session(page_url)
     r = sess.get(data_url, timeout=30, headers={"Referer": page_url, "Accept": "application/json, text/csv, */*"})
     r.raise_for_status()
-    base = "https://www.nseindia.com"
+    base = re.match(r"https?://[^/]+", page_url).group(0)
     ctype = r.headers.get("content-type", "")
     if "json" in ctype or r.text.lstrip()[:1] in "[{":
         rows = _json_rows(r.json(), base)
@@ -375,7 +390,7 @@ def nse_data(data_url, page_url=None, start=None, end=None):
         table = [row for row in csv.reader(io.StringIO(r.content.decode("utf-8-sig", "replace"))) if any(c.strip() for c in row)]
         rows = _table_rows(table)
     if not rows:
-        raise RuntimeError("the NSE data address answered but contained no list of documents - check the address in Settings")
+        raise RuntimeError("the data address answered but contained no list of documents - check the address in Settings")
     return rows
 
 
@@ -399,12 +414,12 @@ def exchange_listing(name, url=None, start=None, end=None):
     url = url or EXCHANGE_SOURCES[name]
     base = re.match(r"https?://[^/]+", url).group(0)
     rows, err = [], None
-    data_url = next(iter(NSE_DATA.values()), "") if "nse" in name.lower() else ""
+    data_url = DATA_ADDRESSES.get(name, "")
     if data_url:
-        rows = nse_data(data_url, url, start, end)      # errors here are reported as they are (the address is the user's setting)
-        if re.search(r"index=equities", data_url, re.I):   # same address with index=sme gives the Emerge (SME) list
+        rows = exchange_data(data_url, url, start, end)   # errors here are reported as they are (the address is the user's setting)
+        if "nse" in name.lower() and re.search(r"index=equities", data_url, re.I):   # index=sme gives the Emerge (SME) list
             try:
-                sme = nse_data(re.sub(r"index=equities", "index=sme", data_url, flags=re.I), url, start, end)
+                sme = exchange_data(re.sub(r"index=equities", "index=sme", data_url, flags=re.I), url, start, end)
                 for it in sme:
                     it["board"] = "SME"
                 rows += sme
@@ -588,6 +603,22 @@ def _nearest_state(window, at):
     return best[1] if best else None
 
 
+# PIN ranges that belong to a different state than their first two digits suggest
+_PIN3 = {"160": "Chandigarh", "194": "Ladakh", "246": "Uttarakhand", "247": "Uttarakhand", "248": "Uttarakhand", "249": "Uttarakhand",
+         "262": "Uttarakhand", "263": "Uttarakhand", "396": "Gujarat", "403": "Goa", "605": "Puducherry", "609": "Puducherry",
+         "682": "Kerala", "737": "Sikkim", "744": "Andaman and Nicobar Islands", "790": "Arunachal Pradesh", "791": "Arunachal Pradesh",
+         "792": "Arunachal Pradesh", "793": "Meghalaya", "794": "Meghalaya", "795": "Manipur", "796": "Mizoram", "797": "Nagaland",
+         "798": "Nagaland", "799": "Tripura", "814": "Jharkhand", "815": "Jharkhand", "816": "Jharkhand", "490": "Chhattisgarh",
+         "491": "Chhattisgarh", "492": "Chhattisgarh", "493": "Chhattisgarh", "494": "Chhattisgarh", "495": "Chhattisgarh",
+         "496": "Chhattisgarh", "497": "Chhattisgarh", "500": "Telangana", "501": "Telangana", "502": "Telangana", "503": "Telangana",
+         "504": "Telangana", "505": "Telangana", "506": "Telangana", "507": "Telangana", "508": "Telangana", "509": "Telangana"}
+
+
+def pin_state(pin):
+    """State of a PIN code from its first digits (India Post lookup, when reachable, overrides this)."""
+    return _PIN3.get(pin[:3]) or _PIN.get(pin[:2]) if pin else None
+
+
 def extract_location(text):
     """Registered office from a DRHP / RHP cover page -> {address, city, district, state, pin}.
     Cover pages often print the address under a row of headings (Registered Office | Corporate Office | Contact Person ...),
@@ -595,7 +626,7 @@ def extract_location(text):
     t = re.sub(r"[ \t]+", " ", text or "")
     anchor = re.search(r"registered\s+(and\s+corporate\s+)?office", t, re.I)
     a0 = anchor.end() if anchor else 0
-    pins = [m for m in _PIN_RX.finditer(t) if (m.group(1) + m.group(2))[:2] in _PIN]
+    pins = [m for m in _PIN_RX.finditer(t) if pin_state(m.group(1) + m.group(2))]
     pm = next((m for m in pins if a0 <= m.start() <= a0 + 900), None) or next((m for m in pins if m.start() < 4000), None)
     if pm:
         pin = pm.group(1) + pm.group(2)
@@ -604,7 +635,7 @@ def extract_location(text):
         # drop the column headings if they sit between 'Registered Office' and the address
         window = re.sub(r"(corporate office|contact person|e-?mail and telephone|telephone|website)\s*", " ", window, flags=re.I)
         block = re.sub(r"\s+", " ", window).strip(" ,;:-")
-        state = _nearest_state(window, pm.start() - w0) or _PIN.get(pin[:2])
+        state = _nearest_state(window, pm.start() - w0) or pin_state(pin)
     else:
         pin = ""
         m = re.search(r"registered (and corporate )?office\s*[:\-]?\s*(.{20,300})", t, re.I | re.S)
@@ -681,15 +712,21 @@ def load_settings():
             saved = json.load(fh)
     except Exception:
         return
-    for d in (SOURCES, EXCHANGE_SOURCES, NSE_DATA):
+    for d in (SOURCES, EXCHANGE_SOURCES):
         for k in d:
             if saved.get(k):
                 d[k] = saved[k]
+    for k in DATA_ADDRESSES:
+        DATA_ADDRESSES[k] = saved.get("data: " + k, DATA_ADDRESSES[k])
+    old_nse = saved.get("NSE data address (JSON behind the offer documents page)")   # setting name used before BSE was added
+    nse_key = next(k for k in DATA_ADDRESSES if k.startswith("NSE"))
+    if old_nse and not DATA_ADDRESSES[nse_key]:
+        DATA_ADDRESSES[nse_key] = old_nse
 
 
 def save_settings():
     with open(_settings_path(), "w", encoding="utf-8") as fh:
-        json.dump({**SOURCES, **EXCHANGE_SOURCES, **NSE_DATA}, fh, indent=1)
+        json.dump({**SOURCES, **EXCHANGE_SOURCES, **{"data: " + k: v for k, v in DATA_ADDRESSES.items()}}, fh, indent=1)
 
 
 def load_location_cache():

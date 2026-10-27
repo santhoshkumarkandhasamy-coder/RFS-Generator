@@ -62,9 +62,9 @@ with st.sidebar:
             regulatory.SOURCES[k] = st.text_input(k, regulatory.SOURCES[k], key="url_" + k)
         for k in list(regulatory.EXCHANGE_SOURCES):
             regulatory.EXCHANGE_SOURCES[k] = st.text_input(k, regulatory.EXCHANGE_SOURCES[k], key="url_" + k)
-        for k in list(regulatory.NSE_DATA):
-            regulatory.NSE_DATA[k] = st.text_input(k, regulatory.NSE_DATA[k], key="url_" + k, help=regulatory.NSE_HOW_TO,
-                                                   placeholder="https://www.nseindia.com/api/...")
+            regulatory.DATA_ADDRESSES[k] = st.text_input(f"{k.split(' - ')[0]} data address (copied from the browser)",
+                                                         regulatory.DATA_ADDRESSES[k], key="data_" + k, help=regulatory.DATA_HOW_TO,
+                                                         placeholder="https://.../api/...")
         if st.button("Save settings", help="Remembered on this PC for next time"):
             try:
                 regulatory.save_settings()
@@ -290,9 +290,9 @@ with reg_tab:
             st.info(f"No DRHP / RHP filings found for {per}.")
         for e in of["errors"]:
             src = e.split(":")[0]
-            if src.startswith("NSE") and not next(iter(regulatory.NSE_DATA.values()), ""):
-                st.warning("NSE: set the NSE data address once in the sidebar (Settings - source URLs) so the app can read NSE "
-                           "directly. How to find it: " + regulatory.NSE_HOW_TO + "  Or use *Add a list downloaded from NSE / BSE* below.")
+            if src in regulatory.DATA_ADDRESSES and not regulatory.DATA_ADDRESSES[src]:
+                st.warning(f"{src.split(' - ')[0]}: set its data address once in the sidebar (Settings - source URLs) so the app can "
+                           "read it directly. How to find it: " + regulatory.DATA_HOW_TO + "  Or use *Add a list downloaded from NSE / BSE* below.")
             elif src.startswith("NSE") or src.startswith("BSE"):
                 st.warning(f"Could not read {src}. Check the address in Settings - source URLs, or open the page (Source links below), "
                            "use its Download (.csv / Excel) option, and add the file under *Add a list downloaded from NSE / BSE*.")
@@ -330,7 +330,13 @@ with reg_tab:
             lc1, lc2 = st.columns([3, 2])
             lc1.caption("SEBI lists only the company name. To filter by state, the app reads the registered office "
                         "on the cover page of each offer document (downloads each PDF once; results are remembered on this PC).")
-            if missing and lc2.button(f"Find company locations ({len(missing)} filings)"):
+            auto = lc2.checkbox("Find locations automatically for every filing", value=True, key="auto_loc",
+                                help="Reads each new filing's cover page as soon as the list loads. Untick to do it only with the button.")
+            run_key = f"{of['checked']}|{of.get('period')}|{len(items)}"
+            run_auto = auto and missing and ss.get("_auto_loc_for") != run_key     # once per loaded list (failed ones: use the button)
+            if run_auto:
+                ss._auto_loc_for = run_key
+            if missing and (run_auto or lc2.button(f"Find company locations ({len(missing)} filings)")):
                 bar = st.progress(0.0, text="Reading cover pages...")
                 regulatory.locate_all(items, ss.workdir, cache, progress=lambda d, n: bar.progress(d / n, text=f"Reading cover pages... {d}/{n}"))
                 bar.empty()
@@ -346,7 +352,8 @@ with reg_tab:
                 st.caption(f"{len(missing)} filing(s) have no location yet and are hidden by the filter - press Find company locations.")
 
             df = pd.DataFrame([{"Date": i["date"], "Company": i["title"], "Type": i["source"], "Source": i.get("exchange", "SEBI"),
-                                "Filed / listed on": i.get("seen_on", ""), "State": i.get("state", ""), "Link": i["url"]} for i in shown])
+                                "Filed / listed on": i.get("seen_on", ""), "State": i.get("state", ""),
+                                "Location": ", ".join(x for x in (i.get("city", ""), i.get("pin", "")) if x), "Link": i["url"]} for i in shown])
             st.dataframe(df, hide_index=True, width="stretch", column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open")})
             failed = [it for it in items if it.get("error")]
             if failed:
