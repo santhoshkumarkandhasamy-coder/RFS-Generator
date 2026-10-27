@@ -58,6 +58,33 @@ def _company_names(text):
     return out
 
 
+# label | value layouts (Excel forms, MCA master data): first non-empty cell after the label
+_KV = {
+    "name": r"(?:company|entity)\s+name", "cin": r"cin|corporate identity number", "aud_partner": r"partner'?s?\s+name|name of (?:the )?partner",
+    "aud_frn": r"frn(?:\s+number)?|firm reg(?:istration|n)?\.?\s*(?:no\.?|number)?", "aud_firm": r"(?:audit\s+)?firm\s+name|name of (?:the )?(?:audit )?firm",
+    "aud_mno": r"membership\s+(?:no\.?|number)|m\.?\s*no\.?", "address": r"registered\s+(?:office\s+)?address|registered office",
+}
+
+
+def _kv(text):
+    out = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        for i, c in enumerate(cells):
+            for field, rx in _KV.items():
+                if field not in out and re.fullmatch(rx, c, re.I):
+                    val = next((x for x in cells[i + 1:] if x), "")
+                    if val and not re.fullmatch(r"[\d.]+|0", val) or field in ("aud_mno", "aud_frn", "cin"):
+                        if val and not any(re.fullmatch(r2, val, re.I) for r2 in _KV.values()):
+                            out[field] = val
+    return out
+
+
+def _amount_rupees(v):
+    """Statement amounts may be in lakhs (e.g. 110.15077): small values with decimals are read as lakhs."""
+    return v * 100000 if v < 100000 and v != int(v) else v
+
+
 def company_details(docs):
     """docs: {name: text}. Returns {field: (value, source document)} for what could be found."""
     found = {}
@@ -88,6 +115,24 @@ def company_details(docs):
                     put("former", "(Formerly known as " + re.sub(r"\s+", " ", m.group(1)).strip() + ")", src_)
                     break
 
+    peer_docs = [k for k in docs if re.search(r"peer\s*review", k + " " + docs[k][:3000], re.I)]
+    for src in peer_docs:                         # the RFS is signed by the peer-reviewed auditor: take the firm from its certificate
+        text = docs[src]
+        m = re.search(r"(?:certif\w+\s+that|issued\s+to|in favour of|M/s\.?)\s*([A-Z][A-Za-z0-9&.,' ]{2,80}?(?:& Co\.?|& Associates|LLP|Associates|Company))", text)
+        if m:
+            put("aud_firm", re.sub(r"\s+", " ", m.group(1)).strip(" ,."), src)
+        m = FRN_RX.search(text) or re.search(r"\b(\d{6}[A-Z])\b", text)
+        if m:
+            put("aud_frn", m.group(1).upper(), src)
+        m = PEER_RX.search(text) or re.search(r"certificate\s+(?:no\.?|number)\s*[:\-.]?\s*(\d{4,6})", text, re.I)
+        if m:
+            put("aud_peer", m.group(1), src)
+    for src, text in docs.items():
+        for field, val in _kv(text).items():
+            if field.startswith("aud_") and peer_docs and src not in peer_docs:
+                continue                      # statutory auditor's details - not the peer-reviewed auditor who signs the RFS
+            put(field, val, src)
+
     for src, text in docs.items():
         flat = re.sub(r"[ \t]+", " ", text)
         # registered office
@@ -115,27 +160,46 @@ def company_details(docs):
             if fv:
                 put("face_value", float(fv.group(1)), src)
             amts = [a for a in (_amount(x) for x in re.findall(r"\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d{6,}(?:\.\d+)?", seg)) if a]
-            if amts:
-                put("authorised_capital", max(amts), src)     # the share count and the rupee amount both appear; capital is the larger
+            if amts and (not found.get("authorised_capital") or max(amts) > found["authorised_capital"][0]):
+                found["authorised_capital"] = (max(amts), src)   # highest across documents: authorised capital only increases
+        # closing stock (inventories) of the latest year: 'Inventories | note | current | previous'
+        for line in text.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if any(re.fullmatch(r"inventor(?:y|ies)|stock[- ]in[- ]trade", c, re.I) for c in cells):
+                nums = [_amount(c) for c in cells if re.fullmatch(r"-?[\d,]+(?:\.\d+)?", c)]
+                nums = [n for n in nums if n is not None]
+                if nums and float(nums[0]).is_integer() and nums[0] < 100 and len(nums) > 1:
+                    nums = nums[1:]                       # drop the note number
+                if nums and nums[0] > 0:
+                    put("closing_stock", round(_amount_rupees(nums[0]), 2), src)
+                    break
         if re.search(r"115\s*BAA", flat, re.I):
             put("tax_rate", 0.25168, src)
         # auditor
-        m = re.search(r"For\s+([A-Z][A-Za-z0-9&.,' ]{2,80}?)\s*\n?\s*Chartered\s+Accountants", text, re.I)
-        if m:
-            put("aud_firm", re.sub(r"\s+", " ", m.group(1)).strip(" ,."), src)
-        for rx, field in ((FRN_RX, "aud_frn"), (MNO_RX, "aud_mno"), (UDIN_RX, "aud_udin"), (PEER_RX, "aud_peer")):
-            m = rx.search(flat)
+        # auditor's report / financials name the statutory auditor; the RFS examination report is signed by the peer-reviewed
+        # auditor, so firm / FRN come from a peer review certificate when one is uploaded, and the examination report's
+        # date and UDIN are never taken from statutory audit reports
+        if not peer_docs:
+            m = re.search(r"For\s+([A-Z][A-Za-z0-9&.,' ]{2,80}?)\s*\n?\s*Chartered\s+Accountants", text, re.I)
             if m:
+                put("aud_firm", re.sub(r"\s+", " ", m.group(1)).strip(" ,."), src)
+            m = FRN_RX.search(flat)
+            if m:
+                put("aud_frn", m.group(1).upper(), src)
+        statutory_only = bool(peer_docs) and src not in peer_docs
+        for rx, field in ((MNO_RX, "aud_mno"), (PEER_RX, "aud_peer")):
+            m = rx.search(flat)
+            if m and not statutory_only:
                 put(field, m.group(1).upper(), src)
-        m = re.search(r"([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3})\s*\n?\s*\(?\s*Partner\s*\)?", text)
-        if m and not re.search(r"chartered|accountants|for\b", m.group(1), re.I):
+        m = None if statutory_only else re.search(r"([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3})\s*\n?\s*\(?\s*Partner\s*\)?", text)
+        if m and not re.search(r"chartered|accountants|for\b|managing|review|designated|name", m.group(1), re.I):
             put("aud_partner", m.group(1).strip(), src)
         m = re.search(r"\bPlace\s*[:\-]\s*([A-Za-z ]{3,30})", flat)
         if m:
             put("aud_place", m.group(1).strip().split("  ")[0].strip(), src)
-        m = re.search(r"\bDate\s*[:\-]\s*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}|[0-9]{1,2}(?:st|nd|rd|th)?\s+\w+,?\s+\d{4}|\w+\s+\d{1,2},\s+\d{4})", flat)
-        if m:
-            put("aud_date", m.group(1).strip(), src)
+
+    if "cin" in found and "name" in found and "PTC" in found["cin"][0] and not re.search(r"private", found["name"][0], re.I):
+        put("former", "(Formerly known as " + re.sub(r"\s+(Limited|Ltd\.?)$", " Private Limited", found["name"][0], flags=re.I) + ")", found["cin"][1])
 
     # directors: a name next to a DIN, with the designation printed near it
     dirs, seen = [], set()

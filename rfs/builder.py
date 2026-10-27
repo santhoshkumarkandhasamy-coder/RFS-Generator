@@ -1504,7 +1504,7 @@ def build(cfg, data, src, out_path, overrides=None):
     w(wsH, "B4", "Name of shareholder", fB, bd=bTB)
     for i, k in enumerate(["d26", "d25", "d24"]):
         w(wsH, f"{'CDE'[i]}4", f'=TEXT({md[k]},"dd-mm-yyyy")', fB, bd=bTB, al=wrapc)
-    holders = [(h["name"], h.get("s26", 0), h.get("s25", 0), h.get("s24", 0)) for h in SH]
+    holders = [(h["name"], h.get("s26", 0), h.get("s25", 0), h.get("s24", 0)) for h in SH] or [("[Shareholder name]", 0, 0, 0)]
     r = 5
     for h in holders:
         w(wsH, f"B{r}", h[0])

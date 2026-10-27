@@ -194,13 +194,15 @@ YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24"}
 
 def load_tb(slot, f):
     """Save an uploaded trial balance for a year slot and read it (raises if it cannot be read)."""
+    import uuid
     ext = os.path.splitext(f.name)[1].lower()
-    tdir = os.path.join(ss.workdir, "tb_" + slot)
+    tdir = os.path.join(ss.workdir, "tb_" + slot, uuid.uuid4().hex[:8])   # own folder per upload: a rejected file never replaces the stored TB
     os.makedirs(tdir, exist_ok=True)
     path = os.path.join(tdir, f"TB_{slot}{ext}")
     with open(path, "wb") as fh:
         fh.write(f.getbuffer())
-    ss.tb[slot], ss.tbfile[slot] = tally.read_any_tb(path, tdir)
+    rows, tbfile = tally.read_any_tb(path, tdir)
+    ss.tb[slot], ss.tbfile[slot] = rows, tbfile
     ss["tbname_" + slot] = f.name + str(f.size)
     ss["tbsrc_" + slot] = f.name
 
@@ -226,10 +228,39 @@ def year_slot(text):
     t = re.sub(r"[_\s./]+", "-", text.lower())
     for slot, _ in SLOTS:
         y = years[YKEY[slot]].year
-        pats = [f"{y - 1}-{str(y)[2:]}", f"{str(y - 1)[2:]}-{str(y)[2:]}", f"{y - 1}-{y}", f"fy-?{str(y)[2:]}(?!\\d)", f"mar[a-z]*-?{y}"]
+        pats = [f"{y - 1}-{str(y)[2:]}", f"{str(y - 1)[2:]}-{str(y)[2:]}", f"{y - 1}-{y}", f"fy-?{str(y)[2:]}(?!-?\\d)", f"mar[a-z]*-?{y}"]
         if any(re.search(r"(?<!\d)" + p_, t) for p_ in pats):
             return slot
     return None
+
+
+_PERIOD = re.compile(r"(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s*to\s*(\d{1,2}-[A-Za-z]{3}-\d{2,4})", re.I)
+
+
+def tb_period(text):
+    """(start, end) of a Tally heading like '1-Apr-25 to 31-Mar-26', else None."""
+    m = _PERIOD.search(text or "")
+    if not m:
+        return None
+    out = []
+    for s_ in m.groups():
+        for fmt in ("%d-%b-%y", "%d-%b-%Y"):
+            try:
+                out.append(dt.datetime.strptime(s_.title(), fmt).date()); break
+            except ValueError:
+                pass
+    return tuple(out) if len(out) == 2 else None
+
+
+def slot_for_period(period):
+    """Year slot whose year end is the period's end; None for a stub / other period."""
+    return next((s_ for s_, _ in SLOTS if period and years[YKEY[s_]] == period[1]), None)
+
+
+def names_other_year(name):
+    """True when the file name states a financial year that is none of the three RFS years (e.g. FY 26-27)."""
+    t = re.sub(r"[_\s./']+", "-", name.lower())
+    return bool(re.search(r"(?<!\d)(20)?\d{2}-\d{2}(?!\d)", t)) and year_slot(name) is None
 
 
 def heading_text(f):
@@ -255,10 +286,22 @@ for up in quick or []:
     if up.name.lower().endswith(".json") or key in ss.setdefault("_quick_done", set()):
         continue
     ss._quick_done.add(key)
-    slot = year_slot(up.name) or year_slot(heading_text(up))
+    head = heading_text(up)
+    period = tb_period(head)
     named_tb = bool(re.search(r"trial|\btb\b|tb[-_ ]", up.name, re.I))
-    if (slot or named_tb) and up.name.lower().rsplit(".", 1)[-1] in FILE_TYPES:
-        slot = slot or next((s_ for s_, _ in SLOTS if s_ not in ss.tb), None)
+    if period:                                   # the TB's own heading decides the year
+        slot = slot_for_period(period)
+        if not slot:
+            quick_msg.warning(f"{up.name} covers {period[0]:%d-%b-%Y} to {period[1]:%d-%b-%Y}, which is not one of the three RFS years "
+                              f"({', '.join(fy_label(years[YKEY[s_]]) for s_, _ in SLOTS)}). Stub periods are not supported yet - "
+                              "added to supporting documents.")
+    else:
+        slot = year_slot(up.name) or year_slot(head)
+        if not slot and named_tb and not names_other_year(up.name):
+            slot = next((s_ for s_, _ in SLOTS if s_ not in ss.tb), None)
+        elif not slot and named_tb:
+            quick_msg.warning(f"{up.name}: the year in the file name is not one of the three RFS years - added to supporting documents.")
+    if slot and up.name.lower().rsplit(".", 1)[-1] in FILE_TYPES:
         if slot:
             before = {k: ss.get(k) for k in ("tbname_" + slot, "tbsrc_" + slot)}, ss.tb.get(slot), ss.tbfile.get(slot)
             with st.spinner(f"Reading {up.name} as trial balance..."):
@@ -297,6 +340,10 @@ with tabs[1]:
             if f is not None and ss.get("tbname_" + slot) != f.name + str(f.size):
                 with st.spinner("Reading trial balance..."):
                     try:
+                        per = tb_period(heading_text(f))
+                        if per and years[YKEY[slot]] != per[1]:
+                            st.warning(f"{f.name} covers {per[0]:%d-%b-%Y} to {per[1]:%d-%b-%Y}, not {fy_label(years[YKEY[slot]])} "
+                                       f"(year ended {years[YKEY[slot]]:%d-%b-%Y}). Check that this is the right file for this year.")
                         load_tb(slot, f)
                     except Exception as e:
                         st.error(f"Could not read {f.name}: {e}")
