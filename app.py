@@ -326,7 +326,7 @@ with reg_tab:
             for it in items:                         # locations already found earlier (cached on this PC)
                 if it["url"] in cache:
                     it.update({k: cache[it["url"]].get(k, "") for k in ("city", "district", "state", "pin", "address", "error")})
-            missing = [it for it in items if it["url"] not in cache or cache[it["url"]].get("error")]
+            missing = [it for it in items if regulatory.needs_location(cache.get(it["url"]))]
             lc1, lc2 = st.columns([3, 2])
             lc1.caption("SEBI lists only the company name. To filter by state, the app reads the registered office "
                         "on the cover page of each offer document (downloads each PDF once; results are remembered on this PC).")

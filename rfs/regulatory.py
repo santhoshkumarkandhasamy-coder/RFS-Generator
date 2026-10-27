@@ -573,30 +573,54 @@ _PIN = {"11": "Delhi", "12": "Haryana", "13": "Haryana", "14": "Punjab", "15": "
         "83": "Jharkhand", "84": "Bihar", "85": "Bihar"}
 
 
+_PIN_RX = re.compile(r"(?<![\d,.])([1-8]\d{2})\s?(\d{3})(?!\d)(?![,.]\d)")   # 6-digit PIN, not part of a number like 48,00,000
+LOC_VERSION = 2      # bump when the address reader changes, so cached locations are read again
+
+
+def _nearest_state(window, at):
+    """State name (or alias) in the window closest to position `at` (the PIN)."""
+    low, best = window.lower(), None
+    for name in STATES + list(_STATE_ALIASES):
+        for m in re.finditer(r"\b" + re.escape(name.lower()) + r"\b", low):
+            d = abs(m.start() - at)
+            if best is None or d < best[0]:
+                best = (d, _STATE_ALIASES.get(name, name))
+    return best[1] if best else None
+
+
 def extract_location(text):
-    """Registered office address -> {address, city, state, pin}. Reads the 'Registered Office' block of a DRHP / RHP cover page."""
+    """Registered office from a DRHP / RHP cover page -> {address, city, district, state, pin}.
+    Cover pages often print the address under a row of headings (Registered Office | Corporate Office | Contact Person ...),
+    so the address is found by its PIN code: the first PIN after 'Registered Office' (else the first on the page)."""
     t = re.sub(r"[ \t]+", " ", text or "")
-    m = re.search(r"registered (and corporate )?office\s*[:\-]?\s*(.{20,400}?)(?:\n\s*\n|corporate office|contact person|telephone|tel\s*[:.]|e-?mail|website|$)",
-                  t, re.I | re.S)
-    block = re.sub(r"\s+", " ", m.group(2)).strip(" ,;") if m else ""
-    hay = (block or t[:6000]).lower()
-    state = next((s_ for s_ in sorted(STATES, key=len, reverse=True) if s_.lower() in hay), None)
-    if not state:
-        state = next((v for k, v in _STATE_ALIASES.items() if k in hay), None)
+    anchor = re.search(r"registered\s+(and\s+corporate\s+)?office", t, re.I)
+    a0 = anchor.end() if anchor else 0
+    pins = [m for m in _PIN_RX.finditer(t) if (m.group(1) + m.group(2))[:2] in _PIN]
+    pm = next((m for m in pins if a0 <= m.start() <= a0 + 900), None) or next((m for m in pins if m.start() < 4000), None)
+    if pm:
+        pin = pm.group(1) + pm.group(2)
+        w0 = max(a0 if anchor and a0 <= pm.start() else 0, pm.start() - 260)
+        window = t[w0:pm.end() + 60]
+        # drop the column headings if they sit between 'Registered Office' and the address
+        window = re.sub(r"(corporate office|contact person|e-?mail and telephone|telephone|website)\s*", " ", window, flags=re.I)
+        block = re.sub(r"\s+", " ", window).strip(" ,;:-")
+        state = _nearest_state(window, pm.start() - w0) or _PIN.get(pin[:2])
+    else:
+        pin = ""
+        m = re.search(r"registered (and corporate )?office\s*[:\-]?\s*(.{20,300})", t, re.I | re.S)
+        block = re.sub(r"\s+", " ", m.group(2)).strip() if m else ""
+        state = _nearest_state(block, 0) if block else None
+    hay = block.lower()
     city = next((c.title() for c in sorted(CITIES, key=len, reverse=True) if re.search(r"\b" + re.escape(c) + r"\b", hay)), "")
-    pin_m = re.search(r"\b([1-8]\d{2})\s?(\d{3})\b", block) or (None if block else re.search(r"\b([1-8]\d{2})\s?(\d{3})\b", hay))
-    pin = (pin_m.group(1) + pin_m.group(2)) if pin_m else ""
     if not state and city:
         state = CITIES[city.lower()]
-    if not state and pin:
-        state = _PIN.get(pin[:2])
-    if not city and block:   # the word just before the PIN / state is usually the city
-        mm = re.search(r"([A-Za-z][A-Za-z .]{2,30}?)\s*[-,]?\s*(?:\d{3}\s?\d{3})", block)
+    if not city and pin:        # the word just before the PIN is usually the city
+        mm = re.search(r"([A-Za-z][A-Za-z .]{2,30}?)\s*[-–,]?\s*" + pin[:3] + r"\s?" + pin[3:], block)
         if mm:
-            city = mm.group(1).strip(" ,.-").split(",")[-1].strip().title()
+            city = mm.group(1).strip(" ,.-–").split(",")[-1].strip().title()
     dm = re.search(r"\b(?:district|dist\.?)\s*[:\-]?\s*([A-Za-z][A-Za-z .]{2,30}?)(?=\s*[-,]|\s*\d|$)", block, re.I)
     district = dm.group(1).strip(" .").title() if dm else ""
-    return {"address": block[:300], "city": city, "district": district, "state": state or "", "pin": pin}
+    return {"address": block[:300], "city": city, "district": district, "state": state or "", "pin": pin, "v": LOC_VERSION}
 
 
 PIN_API = "https://api.postalpincode.in/pincode/{pin}"   # India Post PIN directory (free, no key)
@@ -709,11 +733,15 @@ def company_location(page_url, work_dir, pdf=None):
     return loc
 
 
+def needs_location(entry):
+    return not entry or bool(entry.get("error")) or entry.get("v", 1) < LOC_VERSION
+
+
 def locate_all(items, work_dir, cache=None, workers=4, progress=None):
     """Adds city / state to listing items (cached by filing URL). progress(done, total) is called as filings finish."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     cache = cache if cache is not None else load_location_cache()
-    todo = [it for it in items if it["url"] not in cache or cache[it["url"]].get("error")]   # failed ones are tried again
+    todo = [it for it in items if needs_location(cache.get(it["url"]))]   # new, failed, or read by an older version
     done = len(items) - len(todo)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(company_location, it["url"], work_dir, it.get("pdf")): it for it in todo}
@@ -722,7 +750,7 @@ def locate_all(items, work_dir, cache=None, workers=4, progress=None):
             try:
                 cache[it["url"]] = f.result()
             except Exception as e:
-                cache[it["url"]] = {"address": "", "city": "", "district": "", "state": "", "pin": "", "error": str(e)[:200]}
+                cache[it["url"]] = {"address": "", "city": "", "district": "", "state": "", "pin": "", "error": str(e)[:200], "v": LOC_VERSION}
             done += 1
             if progress:
                 progress(done, len(items))
