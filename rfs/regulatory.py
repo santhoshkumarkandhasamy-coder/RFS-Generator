@@ -402,6 +402,14 @@ def exchange_listing(name, url=None, start=None, end=None):
     data_url = next(iter(NSE_DATA.values()), "") if "nse" in name.lower() else ""
     if data_url:
         rows = nse_data(data_url, url, start, end)      # errors here are reported as they are (the address is the user's setting)
+        if re.search(r"index=equities", data_url, re.I):   # same address with index=sme gives the Emerge (SME) list
+            try:
+                sme = nse_data(re.sub(r"index=equities", "index=sme", data_url, flags=re.I), url, start, end)
+                for it in sme:
+                    it["board"] = "SME"
+                rows += sme
+            except Exception:
+                pass
     try:
         import requests
         sess = requests.Session()
@@ -432,7 +440,7 @@ def exchange_listing(name, url=None, start=None, end=None):
             continue
         seen.add(k)
         it["source"] = _doc_type(it.get("text", "") + " " + it["title"] + " " + it["url"])
-        it["exchange"] = "NSE" if "nse" in name.lower() else ("BSE SME" if "sme" in name.lower() else "BSE")
+        it["exchange"] = ("NSE Emerge" if it.get("board") == "SME" else "NSE") if "nse" in name.lower() else ("BSE SME" if "sme" in name.lower() else "BSE")
         out.append(it)
     return out
 
