@@ -522,7 +522,7 @@ def import_listing(path, exchange, work_dir=None):
 
 def pdf_links(page_url):
     """PDF links on a SEBI filing page (the DRHP / RHP document itself). A direct PDF link is returned as is."""
-    if re.search(r"\.pdf($|\?)", page_url, re.I):
+    if re.search(r"\.(pdf|zip)($|\?)", page_url, re.I):
         return [page_url]
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
@@ -530,10 +530,10 @@ def pdf_links(page_url):
     out = []
     for tag in soup.find_all(["a", "iframe", "embed", "object"]):
         src = tag.get("href") or tag.get("src") or tag.get("data") or ""
-        m = re.search(r"(https?://[^\"'\s]+\.pdf)", src, re.I) or re.search(r"file=(https?://[^\"'&\s]+\.pdf)", src, re.I)
+        m = re.search(r"(https?://[^\"'\s]+\.(?:pdf|zip))", src, re.I) or re.search(r"file=(https?://[^\"'&\s]+\.pdf)", src, re.I)
         if m:
             out.append(m.group(1))
-        elif re.search(r"\.pdf($|\?)", src, re.I):
+        elif re.search(r"\.(pdf|zip)($|\?)", src, re.I):
             out.append(urljoin(page_url, src))          # relative link - resolve against the page it is on
     return list(dict.fromkeys(out))
 
@@ -541,16 +541,79 @@ def pdf_links(page_url):
 def download(url, path):
     import requests
     site = re.match(r"https?://[^/]+", url).group(0)
-    hdr = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": site + "/", "Accept": "application/pdf,*/*"}
+    hdr = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": site + "/", "Accept": "application/pdf,application/zip,*/*"}
     with requests.get(url, timeout=180, stream=True, headers=hdr) as r:
         r.raise_for_status()
         with open(path, "wb") as fh:
             for chunk in r.iter_content(1 << 16):
                 fh.write(chunk)
-    with open(path, "rb") as fh:
-        if fh.read(5) != b"%PDF-":
-            raise ValueError(f"the site returned a web page instead of the PDF (it may require opening the link in a browser): {url}")
+    if file_kind(path) not in ("pdf", "zip"):
+        raise ValueError(f"the site returned a web page instead of the PDF (it may require opening the link in a browser): {url}")
     return path
+
+
+def file_kind(path):
+    with open(path, "rb") as fh:
+        head = fh.read(5)
+    return "pdf" if head == b"%PDF-" else ("zip" if head[:2] == b"PK" else "other")
+
+
+def pdf_from_zip(zip_path, out_path):
+    """BSE gives offer documents as ZIP files: extract the main PDF (DRHP / RHP / prospectus, else the largest; one level of
+    nested ZIP is opened too). Members are copied to out_path, never extracted by their own names."""
+    import io
+    import zipfile
+
+    def pdfs(zf, depth=0):
+        found = []
+        for info in zf.infolist():
+            n = info.filename.lower()
+            if n.endswith(".pdf"):
+                found.append((zf, info))
+            elif n.endswith(".zip") and depth == 0:
+                found += pdfs(zipfile.ZipFile(io.BytesIO(zf.read(info))), 1)
+        return found
+
+    zf = zipfile.ZipFile(zip_path)
+    found = pdfs(zf)
+    if not found:
+        raise ValueError("the ZIP file has no PDF inside")
+
+    def rank(item):
+        n = os.path.basename(item[1].filename).lower()
+        main = bool(re.search(r"drhp|draft|red.?herring|rhp|prospectus|offer", n))
+        return (main, "addendum" not in n, item[1].file_size)
+    best_zf, best = max(found, key=rank)
+    with best_zf.open(best) as src, open(out_path, "wb") as dst:
+        for chunk in iter(lambda: src.read(1 << 16), b""):
+            dst.write(chunk)
+    return out_path
+
+
+def get_offer_pdf(url, out_path, pdf=None):
+    """Offer document as a local PDF from a direct PDF / ZIP link, or the PDF / ZIP linked on a filing page.
+    Returns the link that was used."""
+    tmp = out_path + ".download"
+    try:
+        link = pdf or url
+        try:
+            download(link, tmp)
+        except ValueError:                      # a web page: look for the document link on it
+            if pdf:
+                raise
+            links = pdf_links(url)
+            if not links:
+                raise ValueError("no PDF or ZIP link found on the filing page")
+            link = links[0]
+            download(link, tmp)
+        if file_kind(tmp) == "zip":
+            pdf_from_zip(tmp, out_path)
+        else:
+            os.replace(tmp, out_path)
+        return link
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 # ------------------------------------------------------------------ company location (registered office on the cover page)
@@ -747,12 +810,9 @@ def save_location_cache(cache):
 
 def company_location(page_url, work_dir, pdf=None):
     """Downloads the offer document (direct PDF link, or the PDF on a filing page) and reads the registered office from the first pages."""
-    links = [pdf] if pdf else pdf_links(page_url)
-    if not links:
-        raise ValueError("no PDF link found on the filing page")
     path = os.path.join(work_dir, "loc_%08x.pdf" % (abs(hash(page_url)) % 0xFFFFFFFF))
     try:
-        download(links[0], path)
+        link = get_offer_pdf(page_url, path, pdf)
         from pypdf import PdfReader
         rd = PdfReader(path, strict=False)
         text = "\n".join((rd.pages[i].extract_text() or "") for i in range(min(4, len(rd.pages))))
@@ -764,7 +824,7 @@ def company_location(page_url, work_dir, pdf=None):
     if len(text.strip()) < 50:
         raise ValueError("the cover page has no readable text (scanned PDF)")
     loc = add_district(extract_location(text))
-    loc["pdf"] = links[0]
+    loc["pdf"] = link
     if not loc["state"]:
         loc["error"] = "registered office address not found on the first pages"
     return loc

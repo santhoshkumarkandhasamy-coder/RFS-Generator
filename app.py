@@ -373,17 +373,12 @@ with reg_tab:
             if pick != "-" and st.button("Download and compare"):
                 it = shown[labels.index(pick)]
                 try:
-                    with st.spinner("Finding the PDF on the filing page..."):
-                        links = regulatory.pdf_links(it["url"])
-                    if not links:
-                        st.warning("No PDF link found on the filing page - download the PDF from the link and upload it below.")
-                    else:
-                        p = os.path.join(ss.workdir, "reference_offer_document.pdf")
-                        with st.spinner("Downloading (offer documents are large)..."):
-                            regulatory.download(links[0], p)
-                        ss.regcheck["reference"] = {"name": it["title"] + (f" ({it['state']})" if it.get("state") else ""),
-                                                    "type": it["source"], "url": links[0], "date": str(it["date"]),
-                                                    "analysis": regulatory.analyse_offer_document(p)}
+                    p = os.path.join(ss.workdir, "reference_offer_document.pdf")
+                    with st.spinner("Downloading (offer documents are large)..."):
+                        link = regulatory.get_offer_pdf(it["url"], p, it.get("pdf"))
+                    ss.regcheck["reference"] = {"name": it["title"] + (f" ({it['state']})" if it.get("state") else ""),
+                                                "type": it["source"], "url": link, "date": str(it["date"]),
+                                                "analysis": regulatory.analyse_offer_document(p)}
                 except Exception as e:
                     st.warning(f"Download failed ({e}). Download the PDF from the link and upload it below.")
 
