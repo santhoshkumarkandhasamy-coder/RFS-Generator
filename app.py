@@ -13,14 +13,14 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify
+from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract
 
 
 def _reload_if_updated():
     """After a git pull while the app is running, Streamlit re-runs app.py but keeps the old rfs modules in memory:
     reload any module whose file changed since it was loaded."""
     import importlib
-    for mod in (classify, mapping, tally, docreader, regulatory, builder, exporters):     # dependencies first
+    for mod in (classify, mapping, tally, docreader, regulatory, extract, builder, exporters):     # dependencies first
         try:
             m = os.path.getmtime(mod.__file__)
         except OSError:
@@ -96,7 +96,62 @@ reg_tab, docs_tab = TABS[0], TABS[3]
 tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[6], TABS[7]]
 
 # ---------------------------------------------------------------- 1. company
+LABELS = {"name": "Company name", "former": "Formerly known as", "cin": "CIN", "address": "Registered address",
+          "incorporated": "Incorporation (background)", "latest": "Latest year end", "authorised_capital": "Authorised capital (Rs)",
+          "face_value": "Face value (Rs)", "tax_rate": "Tax rate (115BAA)", "aud_firm": "Auditor - firm", "aud_frn": "Auditor - FRN",
+          "aud_partner": "Auditor - partner", "aud_mno": "Auditor - membership no.", "aud_udin": "Auditor - UDIN",
+          "aud_peer": "Auditor - peer review no.", "aud_place": "Auditor - place", "aud_date": "Auditor - date of signing",
+          "directors": "Directors"}
+
+
+def fill_from_documents():
+    """Company tab fields from the uploaded documents; only empty fields are filled."""
+    texts = {k: v.get("text", "") for k, v in ss.docs.items() if v.get("text")}
+    found = extract.company_details(texts)
+    pr, aud, filled = ss.project, dict(ss.project.get("auditor", {})), []
+    for f, (val, src) in found.items():
+        if f.startswith("aud_"):
+            k = {"date": "sign_date"}.get(f[4:], f[4:])
+            if not aud.get(k):
+                aud[k] = val; filled.append(f)
+        elif f == "directors":
+            if not any(str(d.get("name", "")).strip() for d in pr.get("directors", [])):
+                pr["directors"] = val; filled.append(f)
+        elif f == "incorporated":
+            if not pr.get("background"):
+                d, _, act = val.partition(" ")
+                when = dt.date.fromisoformat(d).strftime("%B %d, %Y") if d[:4].isdigit() else ""
+                pr["background"] = (f"The Company was incorporated on {when} {act}".strip() + ".") if when else ""
+                filled.append(f)
+        elif f == "latest":
+            pr["latest"] = val.isoformat(); filled.append(f)
+        elif f in ("authorised_capital",) and not pr.get(f):
+            pr[f] = val; filled.append(f)
+        elif f in ("face_value", "tax_rate"):
+            pr[f] = val; filled.append(f)
+        elif not pr.get(f):
+            pr[f] = val; filled.append(f)
+    pr["auditor"] = aud
+    ss._fill_n = ss.get("_fill_n", 0) + 1          # new widget keys so the filled values show
+    ss._filled = [{"Field": LABELS.get(f, f), "Value": (f"{len(v)} found" if f == "directors" else str(v)),
+                   "Found in": src, "Filled": "Yes" if f in filled else "No - field already had a value"} for f, (v, src) in found.items()]
+
+
 with tabs[0]:
+    fb1, fb2 = st.columns([2, 3])
+    if fb1.button("Fill company details from uploaded documents", disabled=not ss.docs,
+                  help="Reads the documents in Supporting documents / the sidebar upload (audited financials, auditor's report, "
+                       "MCA master data, board report ...). Only empty fields are filled."):
+        fill_from_documents()
+        st.rerun()
+    if not ss.docs:
+        fb2.caption("Upload the audited financial statements and other documents first (sidebar or tab 4).")
+    if ss.get("_filled") is not None:
+        with st.expander(f"Found in documents ({len(ss._filled)} items) - check before generating", expanded=True):
+            if ss._filled:
+                st.dataframe(pd.DataFrame(ss._filled), hide_index=True, width="stretch")
+            else:
+                st.info("Nothing found. Scanned (image) PDFs have no readable text - upload the Word / Excel / text PDF version.")
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Company")
@@ -127,7 +182,7 @@ with tabs[0]:
         }
     st.subheader("Directors / signatories (first two sign the statements)")
     dir_df = st.data_editor(pd.DataFrame(P("directors", [{"din": "", "name": "", "designation": "Director", "category": "Promoter", "signatory": "Yes"}])),
-                            num_rows="dynamic", width="stretch", key="dirs")
+                            num_rows="dynamic", width="stretch", key=f"dirs{ss.get('_fill_n', 0)}")
     ss.project.update({"name": name, "former": former, "cin": cin, "address": address, "segment": segment, "background": background,
                        "objects": objects, "latest": latest.isoformat(), "authorised_capital": authorised, "face_value": fv,
                        "bonus_factor": bonus, "tax_rate": tax_rate, "closing_stock": closing_stock, "auditor": auditor,
