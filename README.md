@@ -19,6 +19,8 @@ streamlit run app.py
 ```
 Open http://localhost:8501. On Windows you can simply double-click `run_app.bat` (needs Python 3.11+ added to PATH). Optional: install LibreOffice so the app can recalculate and preview key figures; otherwise Excel recalculates on open.
 
+**After `git pull`**, close the app window (and any `python.exe` left in Task Manager) before starting `run_app.bat` again. The app always uses port 8501, so an old copy still running shows "port 8501 is already in use" instead of the new copy quietly opening on 8502.
+
 ## Using the app
 
 Quickest way: drop all your files into **Upload input files (any format)** in the sidebar. Trial balances go to the right year (from the year in the file name or heading, e.g. `TB FY 2025-26.pdf`), other files go to Supporting documents, and a saved project `.json` re-opens the project. Or use the tabs:
