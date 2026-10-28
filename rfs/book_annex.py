@@ -382,8 +382,19 @@ def tax_comp(cx):
     rd = ns.line("Difference between book depreciation and tax depreciation (a + b)", lambda p, r: f"={cx.NC[p]}{r1}+{cx.NC[p]}{r2}", font=fB, bd=B_TB)
     ns.sub("Other differences", fI)
     o0 = ns.r
+    loss_led = (cx.I.get("cfs") or {}).get("ppe_loss_ledgers") or []
+    fa_c = getattr(cx, "FBR", None)
     for lbl, v in (T.get("rows") or {}).items():
         if lbl.startswith("Disallowance u/s 40A(7) / 43B - provision for gratuity") and "pl_grat" in cx.refs:
+            continue
+        if "loss on write off" in lbl.lower() and (loss_led or fa_c):
+            # restated loss on deletion of assets = loss in the books - (c) of the FA restatement
+            def lf(p, r):
+                parts = [cx.tbl(p, l) for l in loss_led]
+                if fa_c:
+                    parts.append(f"-'FA Restatement'!{cx.FBC[p]}{cx.FBR['c']}")
+                return "=" + "+".join(parts).replace("+-", "-")
+            ns.line(lbl, lf)
             continue
         ns.line(lbl, lambda p, r, v=v: rs_f(v.get(p), S) or 0)
     if T.get("gratuity_disallow", True) and "pl_grat" not in getattr(cx, "missing", set()):
@@ -653,7 +664,12 @@ def borrowing_terms(cx):
             cx.BT_GUAR.append(r)
         ws.row_dimensions[r].height = max(40, est_height(max((str(b.get(x) or "") for x in ("nature", "security", "roi", "tenor")), key=len), 30))
         r += 1
-    f0, l0 = 11, max(11, r - 1)
+    if r == 11:                      # no facility entered: one empty row keeps the total off its own cell
+        w(ws, f"C{r}", "No borrowings / facilities entered", fGreyI)
+        for k in keys:
+            w(ws, f"{BTC[k]}{r}", 0, fN, ACC)
+        r += 1
+    f0, l0 = 11, r - 1
     w(ws, f"C{r}", "Total", fB)
     for k in keys:
         w(ws, f"{BTC[k]}{r}", f"=SUM({BTC[k]}{f0}:{BTC[k]}{l0})", fB, ACC, bd=B_TB)

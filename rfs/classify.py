@@ -28,7 +28,11 @@ def _fixed_asset(t):
         return "PPE_FURN"
     if _has(t, "vehicle", "motor car", " car", "bike", "two wheeler", "scooter", "truck", "lorry"):
         return "PPE_VEH"
-    if _has(t, "electrical", "electric fitting", "air condition", "generator", "ups"):
+    if _has(t, "air condition", "a/c", "airconditioner", "split ac", "blue star"):
+        return "PPE_OFFEQ"                    # air conditioners: office equipment (Schedule II)
+    if _has(" " + t + " ", " ups ", "ups |", "inverter"):
+        return "PPE_COMP"                     # UPS with the computers it serves
+    if _has(t, "electrical", "electric fitting", "generator"):
         return "PPE_ELEC"
     return "PPE_OFFEQ"
 
@@ -38,6 +42,10 @@ def _expense(t, n):
         return "DEP"
     if _has(t, "income tax", "current tax", "provision for tax", "tax expense", "deferred tax"):
         return "TAX_DEF" if "deferred" in t else "TAX_CUR"
+    if _has(n, "interest on tds", "interest on gst", "interest on tcs", "interest on income tax", "interest u/s", "late fee", "interest on late payment of tds"):
+        return "OE_RATES"                     # statutory interest / late fees: rates and taxes, not finance costs
+    if _has(n, "rozgar", "yojana", "subsidy", "grant received", "incentive scheme", "government incentive"):
+        return "OI_OTH"                       # government incentives credited in an expense group
     if _has(" " + n + " ", "interest", " int ", "int paid", "int.") and not _has(n, "receiv", "income"):
         return "FIN_INT"
     if _has(t, "bank charges", "processing fee", "processing charges", "commitment fee", "loan charges", "finance charges", "financial charges"):
@@ -117,6 +125,9 @@ def classify(p, g, n):
             return ("STLA_OTH", "STB_UNS")
         if _has(t, "short term", "short-term", "bill discount", "invoice discount", "supply chain finance", "packing credit"):
             return ("STLA_OTH", "STB_OTH")
+        if (_has(nl, "finance", "financial services", "capital", "nbfc", "small finance", "investment & finance", "investment and finance")
+                and not _has(nl, "car loan", "vehicle loan", "term loan", "two wheeler")):
+            return ("STLA_OTH", "STB_OTH")    # loans from finance companies: bill discounting / trade finance, not director loans
         if _has(t, "credit card"):
             return ("STLA_OTH", "OCL_EXP")
         if _has(t, "unsecured", "director", "promoter", "relative", "shareholder"):
@@ -134,6 +145,10 @@ def classify(p, g, n):
             return ("OCA_TAX", "STP_TAX")
         if _has(t, "tds recoverable", "tds receivable", "income tax refund", "advance tax"):
             return ("OCA_TAX", "OCL_STAT")
+        if _has(nl, "tds payable", "tcs payable", "rcm", "reverse charge", "gst payable", "pf payable", "esi payable", "professional tax payable"):
+            return ("OCA_GOVT", "OCL_STAT")
+        if "input" in nl and _has(nl, "gst", "igst", "cgst", "sgst", "cess"):
+            return ("OCA_GOVT", "OCA_GOVT")   # input tax credit: balances with government authorities even when shown under duties and taxes
         if _has(nl, "audit fee", "rent payable", "expenses payable", "professional fee"):
             return ("STLA_OTH", "OCL_EXP")
         if _has(t, "duties & taxes", "duties and taxes", "gst", "rcm", "reverse charge", "import duty", "customs", "tax on import", "tds", "tcs", "pf payable", "esi payable", "professional tax", "statutory"):

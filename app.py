@@ -101,6 +101,7 @@ TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. S
 reg_tab, docs_tab, rst_tab, notes_tab, texts_tab = TABS[0], TABS[3], TABS[6], TABS[8], TABS[9]
 tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[7], TABS[10]]
 mapping.CUSTOM[:] = [c for c in (ss.project.get("notes", {}).get("custom_masters") or []) if c.get("name") and c.get("note")]
+mapping.PEOPLE[:] = [d.get("name") for d in ss.project.get("directors", []) if d.get("name")]
 
 # ---------------------------------------------------------------- 1. company
 LABELS = {"name": "Company name", "former": "Formerly known as", "cin": "CIN", "address": "Registered address",
@@ -427,6 +428,30 @@ def import_rfs_file(f, where):
     pr_, nt_, msg_ = import_rfs.import_workbook(pth)
     ss.project.update({k: v for k, v in pr_.items() if v not in (None, "", [], {})})
     ss.project.setdefault("notes", {}).update({k: v for k, v in nt_.items() if v not in (None, "", [], {})})
+    ov_ = import_rfs.import_mapping(pth)                       # ledger -> masters used in the workbook
+    for k_, v_ in ov_.items():
+        ss.overrides.setdefault(k_, v_)
+    for k_, v_ in import_rfs.import_opening_mapping(pth).items():
+        ss.overrides.setdefault(k_, v_)
+    msg_.append(f"ledger mapping of {len(ov_)} ledgers")
+    pk_ = (["S"] if ss.project.get("stub_end") else []) + ["Y1", "Y2", "Y3"]
+    lo_ = import_rfs.import_rpt_overrides(pth, pk_)
+    if lo_:
+        ss.project.setdefault("notes", {})["loan_overrides"] = lo_
+    tx_ = import_rfs.import_texts(pth, pk_)
+    tx_.update(ss.project.get("notes", {}).pop("texts_extra", {}) or {})
+    ss.project.setdefault("texts", {}).update(tx_)
+    msg_.append(f"{len(tx_)} paragraphs (tab 10)")
+    try:
+        lt = dt.date.fromisoformat(ss.project.get("latest") or "2026-03-31")
+        sb = dt.date.fromisoformat(ss.project["stub_end"]) if ss.project.get("stub_end") else None
+        fa_ = import_rfs.detect_fa_register(pth, lt, sb, lt.replace(year=lt.year - 3))
+    except Exception:
+        fa_ = None
+    if fa_:
+        R_ = ss.project.setdefault("restatement", {})
+        R_.update({"fa_mode": "mapped", "fa_map_path": pth, "fa_map": fa_[0], "fa_classmap": fa_[1]})
+        msg_.append(f"fixed asset register (rows {fa_[0]['first_row']}-{fa_[0]['last_row']}, columns mapped)")
     ss._fill_n = ss.get("_fill_n", 0) + 1
     where.success(f"{f.name}: inputs imported - " + "; ".join(msg_) + ". Upload the trial balances; review tabs 2, 6, 8 and 9.")
 
@@ -1178,6 +1203,9 @@ with tabs[5]:
         st.dataframe(pd.DataFrame(rows_, columns=cols_), width="stretch", hide_index=True,
                      column_config={c: st.column_config.NumberColumn(format="%.2f") for c in cols_[1:]})
         (st.success if all(abs(d or 0) < 0.01 for d in diff) else st.error)(f"Balance sheet difference: {diff}")
+        if not all(abs(d or 0) < 0.01 for d in diff) and ss.get("outputs", {}).get("_calc"):
+            for msg_ in ui_book.diagnose(ss.outputs["_calc"]):
+                st.warning(msg_)
     if ss.get("outputs") and any(not k.startswith("_") for k in ss.outputs):
         st.subheader("Downloads")
         mime = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

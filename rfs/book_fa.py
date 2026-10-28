@@ -222,7 +222,7 @@ def fa_restatement(cx):
         w(ws, f"A{r}", fc)
         w(ws, f"B{r}", nc, fBlue)
         crit = f"{clsrc},$A{r}"
-        w(ws, f"C{r}", f"=SUMIFS({rg(N['cost'])},{crit})", fmt=ACC)
+        w(ws, f"C{r}", f'=SUMIFS({rg(N["cost"])},{crit},{rg(N["date"])},"<="&{cx.MDC["Y1"]})', fmt=ACC)   # assets acquired up to the latest year end
         w(ws, f"D{r}", f"=SUMIFS({rg(N['open'])},{crit})", fmt=ACC)
         c = 5
         for p in chron:
@@ -514,7 +514,7 @@ def notes_ppe(cx):
     w(ws, f"C{r}", "Checks (should be nil)", fGreyB)
     r += 1
     for p in cx.PK + ["OPEN"]:
-        lbl = (f"{'Period' if p == 'S' else 'Year'} ended {cx.DATE[p]:%b-%y}: net block = books + restatement entries" if p != "OPEN"
+        lbl = (f"Period ended {cx.DATE[p]:%b-%y}: net block = books + restatement entries; depreciation = Note {{NOTE:DEP}}" if p != "OPEN"
                else f"{long_date(cx.opening)}: opening net block = books + restatement entries")
         w(ws, f"C{r}", lbl, fGrey)
         nb = _nb_ref(cx, p)

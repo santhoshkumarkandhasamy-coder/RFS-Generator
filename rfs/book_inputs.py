@@ -270,8 +270,9 @@ def _ageing(cx, name, heads, rows_lbl, data, note):
                     c.fill = Y_IN
             r += 1
         r += 2
-    if note:
-        w(ws, f"B{r + 1}", note, fI)
+    for i, ln in enumerate(str(note or "").split("\n")):
+        if ln.strip():
+            w(ws, f"B{r + 1 + i}", ln, fI)
     return starts
 
 
@@ -303,14 +304,18 @@ def shareholder_sheet(cx):
             w(ws, f"{cx.SHC[p]}{r}", _num(h.get(p)), fBlue, ACC0)
         cx.SHROW[h.get("name", "")] = r
         r += 1
-    last = max(r - 1, 5)
+    if r == 5:                       # no shareholder entered
+        w(ws, "B5", "[Register of members to be entered]", fRedI)
+        r = 6
+    last = r - 1
     w(ws, f"B{r}", "Total", fB, bd=B_TB2)
     for p in cx.PK:
         c = cx.SHC[p]
         w(ws, f"{c}{r}", f"=SUM({c}5:{c}{last})", fB, ACC0, bd=B_TB2)
     cx.SHTOT = r
-    if cx.texts.get("shareholder_note"):
-        w(ws, f"B{r + 3}", cx.texts["shareholder_note"], fI)
+    for i, ln in enumerate(str(cx.texts.get("shareholder_note") or "").split("\n")):
+        if ln.strip():
+            w(ws, f"B{r + 2 + i}", ln, fI)
 
 
 def adj_sheet(cx):

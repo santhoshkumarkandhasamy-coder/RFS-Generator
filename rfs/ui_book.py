@@ -325,8 +325,13 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
         I["texts"]["sap_background"] = pr["background"]
     # trial balances
     I["tbs"] = {}
+    from .book_core import fy_label as _fyl
     for s, _ in SLOTS:
         rows = []
+        dkey = {"FYS": stub_end, "FY26": years["d26"], "FY25": years["d25"], "FY24": years["d24"]}[s]
+        pre = "@TB " + _fyl(dkey) + "@"                  # mapping imported from an RFS workbook for this year's TB
+        ovs = dict(ss.overrides)
+        ovs.update({"@" + k[len(pre):]: v for k, v in ss.overrides.items() if k.startswith(pre)})
         for x in ss.tb[s]:
             r = {"name": x["name"], "op": x["v"][0], "dr": x["v"][1], "cr": x["v"][2], "cl": x["v"][3]}
             if x.get("type") == "X":
@@ -334,10 +339,12 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
             elif not x.get("inc"):
                 r["group"] = True
             else:
-                m = mapping.master_for(x, 3, ss.overrides)
+                m = mapping.master_for(x, 3, ovs)
                 r["master"] = m[0] if m else None
                 if SLOT2P[s] == "Y3":
-                    mo = mapping.master_for(x, 0, ss.overrides)
+                    ovo = dict(ovs)
+                    ovo.update({"@" + k[6:]: v for k, v in ss.overrides.items() if k.startswith("@OPEN@")})
+                    mo = mapping.master_for(x, 0, ovo)
                     r["op_master"] = mo[0] if mo else r["master"]
             rows.append(r)
         I["tbs"][SLOT2P[s]] = {"title": tb_title(s), "rows": rows}
@@ -409,6 +416,11 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
                          "direct_paid": D.get("direct_paid"), "experience": D.get("experience"), "current": G.get("current", {}),
                          "sensitivity": G.get("sensitivity") if any(any(x is not None for x in r) for r in G.get("sensitivity") or []) else None}
     T = N.get("tax", {})
+    itr = {}
+    for p_, vals in (T.get("itr") or {}).items():            # amounts typed in the editor come back as text
+        itr[p_] = [(_f(str(v).replace(",", "")) if j >= 3 and v not in (None, "") and _f(str(v).replace(",", "")) is not None else v)
+                   for j, v in enumerate(vals or [])]
+    T = dict(T, itr=itr)
     I["tax"] = {"it_dep": T.get("it_dep", {}), "rows": {r["label"]: {p: r.get(p) for p in pk} for r in T.get("other_rows", []) if r.get("label")},
                 "permanent": {r["label"]: {p: r.get(p) for p in pk} for r in T.get("permanent", []) if r.get("label")}, "itr": T.get("itr", {})}
     I["auditor_fees"] = N.get("auditor_fees", {})
@@ -421,3 +433,32 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
 def _num_or_text(v):
     f = _f(v)
     return f if f is not None else v
+
+
+def diagnose(calc_path):
+    """reasons for a balance sheet difference, read from the check cells of the calculated workbook"""
+    wb = openpyxl.load_workbook(calc_path, data_only=True)
+    out = []
+    bs = wb["BS_1"]
+    heads = {c: str(bs.cell(8, c).value or "").replace("\n", " ").replace("As at", "").strip() for c in range(4, 10)}
+    diffs = {c: bs.cell(1, c).value for c in range(4, 10) if isinstance(bs.cell(1, c).value, (int, float)) and abs(bs.cell(1, c).value) > 0.01}
+    if not diffs:
+        return out
+    ne = wb["Notes_Equity & Reserves"]
+    for r in range(1, ne.max_row + 1):
+        if str(ne[f"C{r}"].value or "").startswith("Check: movements in reserves"):
+            for c in range(4, 8):
+                v = ne.cell(r, c).value
+                if isinstance(v, (int, float)) and abs(v) > 0.01:
+                    out.append(f"{heads.get(c, '')}: the books moved Rs. {v:,.2f} lakhs directly through Reserves and surplus (not through the profit). "
+                               "Restate it in the year it relates to - e.g. gratuity charged to reserves (tab 7, Gratuity: 'charged to reserves in books'), "
+                               "PPE aligned with the register through reserves (tab 7, FA register: 'PPE through reserves in books'), or a manual entry in tab 8.")
+    for n in wb.sheetnames:
+        if n.startswith("TB "):
+            ws = wb[n]
+            for r in range(ws.max_row, max(1, ws.max_row - 6), -1):
+                if str(ws[f"A{r}"].value or "").startswith("Check: TB closing") and isinstance(ws[f"H{r}"].value, (int, float)) and abs(ws[f"H{r}"].value) > 1:
+                    out.append(f"{n}: the trial balance itself does not tally (Dr - Cr = Rs. {ws[f'H{r}'].value:,.0f}) - check the TB file / repeated ledgers.")
+    if not out:
+        out.append("Check the mapping (tab 5) for ledgers marked 'Not considered' and the restatement entries (tab 8): every entry must balance.")
+    return out

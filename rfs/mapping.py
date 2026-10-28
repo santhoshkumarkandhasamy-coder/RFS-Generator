@@ -102,9 +102,30 @@ def suggest(primary, parent, name):
             c = "Interest accrued on dues to MSME"
     if "director" in nl and "remuneration" in nl and "payable" in nl:
         c = "Directors' remuneration payable"
-    if "credit card" in nl and c == LBL["OCL_EXP"][0]:
-        c = "Credit card dues"
+    if "credit card" in nl:
+        d = c = "Credit card dues"
+    for side in ("d", "c"):                  # director loans: full name of the director from the Company tab
+        v = d if side == "d" else c
+        if v.startswith(DIRECTOR_PREFIX):
+            v = DIRECTOR_PREFIX + person_name(v[len(DIRECTOR_PREFIX):])
+            if side == "d":
+                d = v
+            else:
+                c = v
     return d, c
+
+
+PEOPLE = []                         # director names from the Company tab (set by the app)
+
+
+def person_name(short):
+    """'Lenin' -> 'C K Lenin Christopher' when a director's name contains it"""
+    toks = [t for t in re.split(r"[^a-z]+", short.lower()) if len(t) > 2 and t not in ("director", "loan", "dir", "mr", "mrs", "ms")]
+    for p in PEOPLE:
+        pl = p.lower()
+        if toks and all(t in pl for t in toks):
+            return p
+    return short
 
 
 def master_for(x, which, overrides=None):
@@ -112,7 +133,7 @@ def master_for(x, which, overrides=None):
     v = x["v"][which]
     other = x["v"][0 if which == 3 else 3]
     s = v if abs(v) > 0.001 else (other if abs(other) > 0.001 else (-1 if x["primary"] in CRED_PRIM else 1))
-    ov = (overrides or {}).get(key(x))
+    ov = (overrides or {}).get(key(x)) or (overrides or {}).get("@" + x["name"].strip())
     d, c = (ov["dr"], ov["cr"]) if ov else suggest(x["primary"], x["parent"], x["name"])
     lbl = d if s >= 0 else c
     if lbl == EXCLUDE:

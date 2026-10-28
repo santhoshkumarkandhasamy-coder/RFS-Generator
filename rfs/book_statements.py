@@ -25,13 +25,13 @@ def signature(cx, ws, r, cL="B", cM="E", cR="G"):
     for c in (cL, cM, cR):
         w(ws, f"{c}{r}", "Sd/-")
     r += 1
-    w(ws, f"{cL}{r}", f"={MD}!$B$23", fB, ACC)
-    w(ws, f"{cM}{r}", f"=PROPER({MD}!$F$4)", fB, ACC)
-    w(ws, f"{cR}{r}", f"=PROPER({MD}!$F$5)", fB, ACC)
+    w(ws, f"{cL}{r}", f'=IF({MD}!$B$23="","[Partner]",{MD}!$B$23)', fB, ACC)
+    w(ws, f"{cM}{r}", f'=IF({MD}!$F$4="","[Director 1]",PROPER({MD}!$F$4))', fB, ACC)
+    w(ws, f"{cR}{r}", f'=IF({MD}!$F$5="","[Director 2]",PROPER({MD}!$F$5))', fB, ACC)
     r += 1
     w(ws, f"{cL}{r}", "Partner")
-    w(ws, f"{cM}{r}", f"={MD}!$G$4", fN, ACC)
-    w(ws, f"{cR}{r}", f"={MD}!$G$5", fN, ACC)
+    w(ws, f"{cM}{r}", f'=""&{MD}!$G$4', fN, ACC)
+    w(ws, f"{cR}{r}", f'=""&{MD}!$G$5', fN, ACC)
     r += 1
     w(ws, f"{cL}{r}", f'="Membership No.: "&{MD}!$B$24')
     w(ws, f"{cM}{r}", f'="DIN: "&{MD}!$E$4')
@@ -42,11 +42,11 @@ def signature(cx, ws, r, cL="B", cM="E", cR="G"):
     w(ws, f"{cM}{r}", "Sd/-")
     w(ws, f"{cR}{r}", "Sd/-")
     r += 1
-    w(ws, f"{cM}{r}", f"=PROPER({MD}!$F$6)", fB, ACC)
-    w(ws, f"{cR}{r}", f"=PROPER({MD}!$F$7)", fB, ACC)
+    w(ws, f"{cM}{r}", f'=IF({MD}!$F$6="","[CFO]",PROPER({MD}!$F$6))', fB, ACC)
+    w(ws, f"{cR}{r}", f'=IF({MD}!$F$7="","[Company Secretary]",PROPER({MD}!$F$7))', fB, ACC)
     r += 1
-    w(ws, f"{cM}{r}", f"={MD}!$G$6", fN, ACC)
-    w(ws, f"{cR}{r}", f"={MD}!$G$7", fN, ACC)
+    w(ws, f"{cM}{r}", f'=""&{MD}!$G$6', fN, ACC)
+    w(ws, f"{cR}{r}", f'=""&{MD}!$G$7', fN, ACC)
     r += 1
     w(ws, f"{cM}{r}", f'="DIN: "&{MD}!$E$6')
     r += 2
