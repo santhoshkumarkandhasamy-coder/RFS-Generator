@@ -113,7 +113,9 @@ def classify(p, g, n):
     if _has(pl, "loans (liability)", "loans(liability)", "borrowing"):
         if _has(t, "bank od", "overdraft", " od ", "od a/c", "cash credit", " cc ", "cc a/c", "working capital"):
             return ("BANK", "STB_BANK")
-        if _has(t, "short term", "short-term", "bill discount", "channel finance", "invoice discount", "supply chain finance", "packing credit"):
+        if _has(t, "channel finance", "purchase bill", "dealer finance"):
+            return ("STLA_OTH", "STB_UNS")
+        if _has(t, "short term", "short-term", "bill discount", "invoice discount", "supply chain finance", "packing credit"):
             return ("STLA_OTH", "STB_OTH")
         if _has(t, "credit card"):
             return ("STLA_OTH", "OCL_EXP")
