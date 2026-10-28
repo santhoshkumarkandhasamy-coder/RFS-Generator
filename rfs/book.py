@@ -124,6 +124,7 @@ def build(I, out_path):
     names += [n for n in wb.sheetnames if n not in names]
     wb._sheets = [wb[n] for n in names]
     wb.active = 1
+    cx.fit_headers()
     cx.resolve()
     wb.save(out_path)
     global LAST_TEXTS

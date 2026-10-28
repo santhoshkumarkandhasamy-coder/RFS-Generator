@@ -98,7 +98,8 @@ def master_data(cx):
         r = 31 + k
         if k < len(ac):
             a = ac[k]
-            w(ws, f"A{r}", ddate(a.get("date")), fBlue, DMY)
+            d0 = ddate(a.get("date")) if a.get("date") else None
+            w(ws, f"A{r}", d0 or cx.opening, fBlue, DMY)        # no date given: in force at the opening balance sheet date
             w(ws, f"B{r}", _num(a.get("amount")), fBlue, NUM0)
             w(ws, f"C{r}", f"=B{r}/$B$7", fN, NUM0)
             w(ws, f"D{r}", a.get("remarks", ""))

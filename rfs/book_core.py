@@ -201,6 +201,58 @@ class Ctx:
     def setref(self, name, row):
         self.refs[name] = row
 
+    def fit_headers(self):
+        """date headings ("As at" / "For the year ended" + date) wrap to three lines in narrow columns: give those rows room"""
+        for ws in self.wb.worksheets:
+            if ws.title.startswith("TB "):
+                continue
+            for row in ws.iter_rows():
+                for c in row:
+                    v = c.value
+                    if isinstance(v, str) and v.startswith('="') and "TEXT(MasterData!" in v and ("\\n" in v or "\n" in v):
+                        width = ws.column_dimensions[c.column_letter].width or 9
+                        pre = v[2:v.index('"', 2)].replace("\n", " ").strip()
+                        lines = 1 + (len(pre) > width * 1.1) + (len("September 30, 2026") > width * 1.05)
+                        need = 13.5 * max(2, lines) + 4
+                        cur = ws.row_dimensions[c.row].height or 15
+                        if cur < need:
+                            ws.row_dimensions[c.row].height = need
+
+    @staticmethod
+    def split_literals(f, limit=240):
+        """Excel rejects string literals over 255 characters in a formula: split them into "..."&"..." pieces"""
+        out, i, n = [], 0, len(f)
+        while i < n:
+            ch = f[i]
+            if ch != '"':
+                out.append(ch)
+                i += 1
+                continue
+            j, buf = i + 1, []
+            while j < n:                      # read one literal ("" is an escaped quote)
+                if f[j] == '"' and j + 1 < n and f[j + 1] == '"':
+                    buf.append('""')
+                    j += 2
+                elif f[j] == '"':
+                    break
+                else:
+                    buf.append(f[j])
+                    j += 1
+            lit = "".join(buf)
+            if len(lit) <= limit:
+                out.append('"' + lit + '"')
+            else:
+                parts, cur = [], ""
+                for tok in buf:
+                    if len(cur) + len(tok) > limit:
+                        parts.append(cur)
+                        cur = ""
+                    cur += tok
+                parts.append(cur)
+                out.append("(" + "&".join('"' + p + '"' for p in parts) + ")")
+            i = j + 1
+        return "".join(out)
+
     def resolve(self):
         pat = re.compile(r"\{\{([^}]+)\}\}")
         npat = re.compile(r"\{NOTE:([A-Za-z_]+)\}")
@@ -210,6 +262,9 @@ class Ctx:
                     v = c.value
                     if isinstance(v, str) and "{NOTE:" in v:
                         v = npat.sub(lambda m: str(self.noteno.get(m.group(1), "[ ]")), v)
+                        c.value = v
+                    if isinstance(v, str) and v.startswith("=") and len(v) > 250 and '"' in v:
+                        v = self.split_literals(v)
                         c.value = v
                     if isinstance(v, str) and "{{" in v:
                         def rep(m):
