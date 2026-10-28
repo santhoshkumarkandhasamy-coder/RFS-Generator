@@ -260,7 +260,8 @@ def fa_mapped_ui(ss, RST, SLOTS, plabel, path):
     with c: M["date"] = sel("Date of purchase column", "date")
     with d: M["del"] = sel("Date of deletion column (optional)", "del")
     st.caption("For each date: WDV column; for each period: depreciation column (restated). For a stub period whose register depreciation is "
-               "for the full period, give the register depreciation column too.")
+               "for the full period, give the register depreciation column too. The opening WDV is optional: without it, the opening WDV is "
+               "taken as the earliest year's closing WDV plus its depreciation.")
     per = M.setdefault("periods", {})
     keys = ["OPEN"] + [SLOT2P[s] for s, _ in reversed(SLOTS)]
     for k in keys:

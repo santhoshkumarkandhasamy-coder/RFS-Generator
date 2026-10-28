@@ -59,6 +59,15 @@ def fa_register(cx):
         for k, d in src.column_dimensions.items():
             ws.column_dimensions[k].width = d.width
         M = FA["map"]
+        per = M.get("periods") or {}
+        miss = [lbl for key, lbl in (("class", "FA classification column"), ("cost", "Cost column"), ("date", "Date of purchase column"))
+                if not M.get(key)]
+        for p in chron:
+            pl = "stub period" if p == "S" else "FY " + fy_label(cx.DATE[p])
+            miss += [f"{pl}: {lbl}" for key, lbl in (("wdv", "WDV at the end"), ("dep", "Depreciation")) if not (per.get(p) or {}).get(key)]
+        if miss:
+            raise ValueError("Fixed asset register (tab 7, section 1): map the column(s) - " + "; ".join(miss) +
+                             ". Or switch the register off / use the standard template.")
         first, last = int(M["first_row"]), int(M["last_row"])
         hdr = int(M.get("header_row", first - 1))
         start = (src.max_column or 1) + 2
@@ -89,8 +98,13 @@ def fa_register(cx):
             w(ws, f"{N['cost']}{r}", f"=N({cost}{r})", fN, ACC)
             w(ws, f"{N['date']}{r}", f"={dcol}{r}", fN, DMY)
             w(ws, f"{N['del']}{r}", f'=IF({M["del"]}{r}="","",{M["del"]}{r})' if M.get("del") else "", fN, DMY)
-            ow = M["periods"]["OPEN"]["wdv"]
-            w(ws, f"{N['open']}{r}", f'=IF(AND({N["date"]}{r}<>"",{N["date"]}{r}>{cx.MDC["OPEN"]}),0,N({ow}{r}))', fN, ACC)
+            ow = (per.get("OPEN") or {}).get("wdv")
+            if ow:
+                op_v = f"N({ow}{r})"
+            else:                   # no opening WDV column: closing WDV + depreciation of the earliest year (assets held at the opening date)
+                e0 = per[chron[0]]
+                op_v = f"N({e0['wdv']}{r})+N({e0.get('dep_reg') or e0['dep']}{r})"
+            w(ws, f"{N['open']}{r}", f'=IF(AND({N["date"]}{r}<>"",{N["date"]}{r}>{cx.MDC["OPEN"]}),0,{op_v})', fN, ACC)
             prev = f"{N['open']}{r}"
             for p in chron:
                 pm = M["periods"][p]

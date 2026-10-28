@@ -1388,7 +1388,11 @@ with tabs[5]:
         upto = f"{stub_end:%b-%y}" if stub_end else fy_label(years['d26'])[3:]
         out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{upto}.xlsx")
         with st.spinner("Building workbook..."):
-            book.build(ui_book.make_input(ss, P, SLOTS, years, stub_end, tb_title), out)
+            try:
+                book.build(ui_book.make_input(ss, P, SLOTS, years, stub_end, tb_title), out)
+            except ValueError as e:              # an input that is missing - say which, instead of a traceback
+                st.error(str(e))
+                st.stop()
             ss.text_defaults = book.LAST_TEXTS
             exporters.add_reference_sheet(out, ss.regcheck, ss.docs,
                                           {plabel(s_): ss.get("tbsrc_" + s_, os.path.basename(ss.tbfile.get(s_, ""))) for s_, _ in SLOTS})
