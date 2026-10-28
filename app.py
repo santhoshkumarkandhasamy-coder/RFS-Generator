@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract, restate
-from rfs import import_rfs
+from rfs import import_rfs, import_fin
 from rfs import book_core, book_masters, book_inputs, book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book
 
 
@@ -461,6 +461,37 @@ def import_rfs_file(f, where):
     where.success(f"{f.name}: inputs imported - " + "; ".join(msg_) + ". Upload the trial balances; review tabs 2, 6, 8 and 9.")
 
 
+def apply_financials(pth):
+    """shareholders and ageing from an audited financial statements workbook -> tab 6 (merged with what is there)"""
+    res = import_fin.read_financials(pth)
+    iso2k = {years[k].isoformat(): k for k in DKEYS}
+    got = []
+    for key, src in (("ageing_dr", "debtor_ageing"), ("ageing_cr", "creditor_ageing")):
+        for iso, m in res[src].items():
+            if iso in iso2k:
+                ss.project.setdefault(key, {})[iso2k[iso]] = m
+                got.append(f"{'receivables' if key == 'ageing_dr' else 'payables'} {years[iso2k[iso]]:%d-%m-%Y}")
+    if res["shareholders"]:
+        SHK_ = {"dS": "sS", "d26": "s26", "d25": "s25", "d24": "s24"}
+        cur = [h for h in ss.project.get("shareholders") or [] if str(h.get("name") or "").strip()]
+        bykey = {import_fin._key(h["name"]): h for h in cur}
+        n = 0
+        for k_, h in res["shareholders"].items():
+            row = bykey.get(k_)
+            if row is None:
+                row = {"name": h["name"], "promoter": False}
+                cur.append(row); bykey[k_] = row
+            for iso, k2 in iso2k.items():
+                if iso in h:
+                    row[SHK_[k2]] = h[iso]
+            row["promoter"] = bool(row.get("promoter")) or h["promoter"]
+            n += 1
+        ss.project["shareholders"] = cur
+        got.append(f"{n} shareholders")
+    ss._fill_n = ss.get("_fill_n", 0) + 1
+    return got
+
+
 def route_upload(up):
     """one file from the sidebar upload: RFS workbook import, trial balance, or supporting document"""
     if is_rfs_workbook(up):
@@ -471,6 +502,22 @@ def route_upload(up):
             except Exception as e:
                 quick_msg.error(f"{up.name}: could not import ({e})")
         return
+    if up.name.lower().endswith((".xlsx", ".xlsm")):
+        tmp_ = os.path.join(ss.workdir, "fin_" + up.name)
+        with open(tmp_, "wb") as fh:
+            fh.write(up.getbuffer())
+        up.seek(0)
+        if import_fin.is_financials(tmp_):
+            with st.spinner(f"Reading shareholders and ageing from {up.name}..."):
+                try:
+                    got = apply_financials(tmp_)
+                    ss._stub_auto = True
+                    quick_msg.success(f"{up.name}: financial statements - " + (", ".join(got) if got else "no shareholders / ageing found")
+                                      + " (tab 6). Also kept as a supporting document.")
+                except Exception as e:
+                    quick_msg.warning(f"{up.name}: could not read shareholders / ageing ({e})")
+            add_doc(up)
+            return
     head = heading_text(up)
     period = tb_period(head)
     named_tb = bool(re.search(r"trial|\btb\b|tb[-_ ]", up.name, re.I))
@@ -842,6 +889,16 @@ with tabs[2]:
 
 # ---------------------------------------------------------------- 4. shareholders & ageing
 with tabs[3]:
+    fin_docs = [d_["path"] for d_ in ss.docs.values() if str(d_.get("path", "")).lower().endswith((".xlsx", ".xlsm"))
+                and import_fin.is_financials(d_["path"])]
+    if fin_docs and st.button(f"Read shareholders and ageing from the financial statements in supporting documents ({len(fin_docs)})", key="fin_read"):
+        got = []
+        for p_ in fin_docs:
+            got += apply_financials(p_)
+        (st.success if got else st.info)("Read: " + ", ".join(got) if got else "No shareholders / ageing found in those workbooks.")
+        st.rerun()
+    st.caption("Upload the audited financial statements workbook of each year (sidebar): the party-wise debtors / creditors ageing "
+               "sheets and the list of shareholders / promoters in the share capital note are read into this tab.")
     st.subheader("Register of members (number of shares)")
     SHK = {"FYS": "sS", "FY26": "s26", "FY25": "s25", "FY24": "s24"}
     sh_cols = {"name": "Name", **{SHK[s_]: plabel(s_) + " end" for s_, _ in SLOTS}, "promoter": "Promoter"}
@@ -874,6 +931,50 @@ with tabs[3]:
     with a2:
         ageing_editor("Trade payables ageing", "ageing_cr", ["< 1 yr", "1-2 yrs", "2-3 yrs", "> 3 yrs"],
                       ["MSME", "Others", "Disputed - MSME", "Disputed - Others"])
+
+    # ageing totals agree with the trial balances (the difference can be put in the first bucket, as in a final RFS)
+    def tb_total(slot, masters):
+        """closing balance (Dr +) of the masters, with the mapping the workbook will use (including year-wise imported mapping)"""
+        pre = "@TB " + book_core.fy_label(years[YKEY[slot]]) + "@"
+        ovs = dict(ss.overrides)
+        ovs.update({"@" + k[len(pre):]: v for k, v in ss.overrides.items() if k.startswith(pre)})
+        tot = 0.0
+        for x in ss.tb.get(slot) or []:
+            if x.get("inc") and x.get("type") != "X":
+                m_ = mapping.master_for(x, 3, ovs)
+                if m_ and m_[0] in masters:
+                    tot += float(x["v"][3] or 0)
+        return tot
+    rec, fix = [], {}
+    for s_, _ in SLOTS:
+        dk = YKEY[s_]
+        if s_ not in ss.tb:
+            continue
+        for key, rows_, masters, sign in (("ageing_dr", [0], ("Trade receivables",), 1),
+                                          ("ageing_cr", [0, 1], ("Dues to micro and small enterprises", "Dues to other creditors"), -1)):
+            m_ = (ss.project.get(key) or {}).get(dk)
+            if not m_ or not any(any(r_) for r_ in m_):
+                continue
+            ag = sum(sum(float(v or 0) for v in r_) for r_ in m_)
+            if key == "ageing_cr":        # MSME and others separately
+                for i_, mm in ((0, ("Dues to micro and small enterprises",)), (1, ("Dues to other creditors",))):
+                    d_ = round(sign * tb_total(s_, mm) - sum(float(v or 0) for v in m_[i_]) - sum(float(v or 0) for v in m_[i_ + 2]), 2)
+                    if abs(d_) >= 1:
+                        rec.append(f"{plabel(s_)} payables ({'MSME' if i_ == 0 else 'others'}): trial balance minus ageing = Rs {d_:,.2f}")
+                        fix[(key, dk, i_)] = d_
+            else:
+                d_ = round(sign * tb_total(s_, masters) - ag, 2)
+                if abs(d_) >= 1:
+                    rec.append(f"{plabel(s_)} receivables: trial balance minus ageing = Rs {d_:,.2f}")
+                    fix[(key, dk, 0)] = d_
+    if rec:
+        st.warning("Ageing does not agree with the trial balance:\n\n- " + "\n- ".join(rec))
+        if st.button("Agree the ageing to the trial balance (difference to the first bucket)", key="ag_fix"):
+            for (key, dk, i_), d_ in fix.items():
+                m_ = ss.project[key][dk]
+                m_[i_][0] = round(float(m_[i_][0] or 0) + d_, 2)
+            ss._fill_n = ss.get("_fill_n", 0) + 1
+            st.rerun()
 
 # ---------------------------------------------------------------- 5. adjustments
 with tabs[4]:
