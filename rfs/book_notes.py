@@ -682,11 +682,15 @@ def notes_pl(cx):
             cx.OI_FD_ROW = rr
         if ln.get("ppe_sale"):
             cx.OI_PPE_ROWS.append(rr)
+    # restatement entries on the Other income masters (the lines above are ledger-wise, from the TB)
+    oi_adj = [m for m, _ in BM.note_lines("OI", cx.custom) if m in cx.adj_masters]
+    if oi_adj:
+        ns.line(cx.text("oi_adj_label", "Restatement adjustments"), lambda p, r: "=" + "+".join(cx.adj_pl(qs(m), p, "Cr") for m in oi_adj))
     if ns.r == f0:
         ns.line("Other income", lambda p, r: 0)
     rt = ns.total(f0, ns.r - 1, ref="pl_oi")
     for i, p in enumerate(cx.PK):        # check: ledger-wise lines agree with the Other income masters
-        tot = "+".join(cx.tb(p, qs(m)) for m, _ in BM.note_lines("OI", cx.custom))
+        tot = "+".join(cx.tb(p, qs(m)) + ("+" + cx.adj_pl(qs(m), p, "Cr") if m in oi_adj else "") for m, _ in BM.note_lines("OI", cx.custom))
         w(ws, f"{CL(5 + cx.N + i + 1)}{rt}", f"=ROUND({cx.NC[p]}{rt}-({tot}),2)", fChk, ACC)
     ns.line("Restated profit before tax", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{PL2_pbt}}}}", font=fI)
     ns.line("Other income as a percentage of restated profit before tax", lambda p, r: f"=IFERROR({cx.NC[p]}{rt}/{cx.NC[p]}{r - 1},0)", font=fI, fmt=PCT)

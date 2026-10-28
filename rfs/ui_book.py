@@ -363,6 +363,13 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
         tx["S"] = "computed"
     if tx:
         rst["tax"] = tx
+    rr = RST.get("rsv") or {}
+    rrc = {"off": bool(RST.get("rsv_off"))}
+    for k, v in rr.items():
+        if k in DK2P and v:
+            rel = v.get("rel") or "same"
+            rrc[DK2P[k]] = {"relates": DK2P.get(rel, rel), "master": v.get("master") or None}
+    rst["reserve_reversal"] = rrc
     I["restatement"] = rst
     has_register = (RST.get("fa_mode") == "mapped" and RST.get("fa_map_path")) or (RST.get("fa_mode") != "mapped" and RST.get("fa_assets"))
     if has_register:          # the register generates the PPE entries: drop typed / imported ones marked 'FA Register'
@@ -444,15 +451,18 @@ def diagnose(calc_path):
     diffs = {c: bs.cell(1, c).value for c in range(4, 10) if isinstance(bs.cell(1, c).value, (int, float)) and abs(bs.cell(1, c).value) > 0.01}
     if not diffs:
         return out
+    md = wb["MasterData"]
+    if md["B9"].value and not md["B19"].value:
+        out.append("The stub period closing stock (Company tab) is blank, so the stub period profit is understated by the whole stock. "
+                   "Enter it and generate again.")
     ne = wb["Notes_Equity & Reserves"]
     for r in range(1, ne.max_row + 1):
         if str(ne[f"C{r}"].value or "").startswith("Check: movements in reserves"):
             for c in range(4, 8):
                 v = ne.cell(r, c).value
                 if isinstance(v, (int, float)) and abs(v) > 0.01:
-                    out.append(f"{heads.get(c, '')}: the books moved Rs. {v:,.2f} lakhs directly through Reserves and surplus (not through the profit). "
-                               "Restate it in the year it relates to - e.g. gratuity charged to reserves (tab 7, Gratuity: 'charged to reserves in books'), "
-                               "PPE aligned with the register through reserves (tab 7, FA register: 'PPE through reserves in books'), or a manual entry in tab 8.")
+                    out.append(f"{heads.get(c, '')}: Rs. {v:,.2f} lakhs moved directly through Reserves and surplus in the books is not reversed. "
+                               "Check tab 7, section 5 'Movements through reserves in the books' (automatic reversal switched off?).")
     for n in wb.sheetnames:
         if n.startswith("TB "):
             ws = wb[n]

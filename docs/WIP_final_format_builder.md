@@ -44,3 +44,11 @@ Confirm with the user before generating the final output / pushing to main.
    FA register standard/mapped, shareholders, ageing, borrowings + current maturities, other income lines, RPT, gratuity,
    contingent, tax, auditor fees, foreign currency, texts); wire to book.build.
 4. Ask the user to confirm, then merge to main and push.
+
+## 28-10-2026 - movements through the books' reserves
+- book_auto.reserve_reversal: any change in the books' Reserves and surplus other than the profit as per books (and not already
+  reversed by the gratuity / PPE inputs or manual entries) is reversed automatically - default to the same year's P&L
+  (Other non-operating income / Miscellaneous expenses), or to an earlier year / opening reserves against the balance sheet
+  account chosen in tab 7, section 5. Amount is a formula on the TB sheets; the entry is written only where the books moved reserves.
+- Other income note: restatement entries on the Other income masters now appear (line "Restatement adjustments").
+- Warnings when the closing stock (stub / latest year) is blank; empty adjustments table no longer crashes tab 5.

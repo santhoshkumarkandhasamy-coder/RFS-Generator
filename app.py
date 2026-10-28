@@ -198,6 +198,8 @@ with tabs[0]:
         bonus = st.number_input("Bonus / split factor after latest year end (1 = none)", value=float(P("bonus_factor", 1.0)))
         tax_rate = st.number_input("Tax rate (e.g. 0.25168 for Sec 115BAA)", value=float(P("tax_rate", 0.25168)), format="%.5f")
         closing_stock = st.number_input("Closing stock at latest year end (Rs) - not in Tally TB", value=float(P("closing_stock", 0.0)))
+        if not closing_stock:
+            st.caption(":orange[Closing stock at the latest year end is blank - enter it unless the company holds no stock.]")
         has_stub = st.checkbox("Include a stub period (interim period after the latest year end)", value=bool(P("stub_end")),
                                help="ICDR: restated financial information for the stub period is needed when the latest audited year is more "
                                     "than six months old at filing. Upload the stub period trial balance in tab 3.")
@@ -205,6 +207,9 @@ with tabs[0]:
             sd = P("stub_end") or latest.replace(month=9, day=30).isoformat()
             stub_end = st.date_input("Stub period ended", dt.date.fromisoformat(sd))
             stub_stock = st.number_input("Closing stock at the stub period end (Rs)", value=float(P("stub_closing_stock", 0.0)))
+            if not stub_stock:
+                st.warning("Stub period closing stock is blank: the stub period's purchases are then charged in full and the profit drops by "
+                           "the whole stock (a large loss). Enter it from the stock statement / books, unless there really is no stock.")
         else:
             stub_end, stub_stock = None, 0.0
         st.subheader("Auditor (peer reviewed)")
@@ -879,6 +884,13 @@ with tabs[4]:
     options = [o for o in mapping.all_labels(extra) if o != mapping.EXCLUDE]
     adj_rows = P("adj_rows", [{"entry": 1, "date": years["d24"].isoformat(), "master": "Reserves and surplus", "particulars": "", "dr": 0.0, "cr": 0.0, "narration": ""}])
     adf = pd.DataFrame(adj_rows)
+    for c_ in ("entry", "date", "master", "particulars", "dr", "cr", "narration"):      # an empty table has no columns
+        if c_ not in adf.columns:
+            adf[c_] = None
+    for c_ in ("entry", "dr", "cr"):
+        adf[c_] = pd.to_numeric(adf[c_], errors="coerce")
+    for c_ in ("master", "particulars", "narration"):
+        adf[c_] = adf[c_].astype(object)
     adf["date"] = pd.to_datetime(adf["date"]).dt.date
     adf = st.data_editor(adf, num_rows="dynamic", width="stretch", key=f"adj{ss.get('_fill_n', 0)}", column_config={
         "entry": st.column_config.NumberColumn("Entry no.", step=1),
@@ -1057,6 +1069,36 @@ with rst_tab:
         if stub_end:
             RST["tax_stub_computed"] = st.checkbox("Stub period: provide current tax on the restated taxable income ('Tax Computation' sheet)",
                                                    value=bool(RST.get("tax_stub_computed")), key="t_stub")
+
+    with st.expander("5. Movements through reserves in the books - reversed automatically", expanded=bool(RST.get("rsv"))):
+        st.caption("When the books post an item directly to Reserves and surplus (prior period gratuity, an alignment of fixed assets, "
+                   "other prior period items), the restated statements must show it in the profit of the period it relates to - otherwise "
+                   "the balance sheet does not tally. The app works out the amount from the trial balances (change in reserves less the "
+                   "profit as per books, less what the entries above already reverse) and posts the reversal itself. By default it goes "
+                   "to the Statement of Profit and Loss of the same year (Other non-operating income / Miscellaneous expenses). If it "
+                   "relates to an earlier year, choose that year and the balance sheet account the books used (e.g. Provision for gratuity).")
+        RST["rsv_off"] = st.checkbox("Do not reverse automatically (I will pass the entries in tab 8)", value=bool(RST.get("rsv_off")), key="rsv_off")
+        if not RST["rsv_off"]:
+            same = "Same year (its Statement of Profit and Loss)"
+            rel_lab = {"same": same, OPEN_KEY: f"Opening reserves as at {years_open:%d-%b-%Y}"}
+            for k_ in per_keys:
+                rel_lab[k_] = date_lab(k_)
+            lab2rel = {v: k for k, v in rel_lab.items()}
+            bs_m = sorted(m for m, v in book_masters.catalogue(mapping.CUSTOM).items()
+                          if v[1] == "BS" and m not in ("Reserves and surplus", "Net profit as per books", "Opening stock"))
+            store = RST.setdefault("rsv", {})
+            df_ = pd.DataFrame({"Period in which the books posted it": [date_lab(k_) for k_ in per_keys],
+                                "Relates to": [rel_lab.get((store.get(k_) or {}).get("rel") or "same", same) for k_ in per_keys],
+                                "Balance sheet account used in the books": [(store.get(k_) or {}).get("master") for k_ in per_keys]})
+            e = st.data_editor(df_, hide_index=True, width="stretch", key="rsv_grid", disabled=["Period in which the books posted it"],
+                               column_config={"Relates to": st.column_config.SelectboxColumn("Relates to", options=list(rel_lab.values())),
+                                              "Balance sheet account used in the books": st.column_config.SelectboxColumn(
+                                                  "Balance sheet account used in the books", options=bs_m,
+                                                  help="Needed only when it relates to an earlier year")})
+            RST["rsv"] = {k_: {"rel": lab2rel.get(r_, "same"), "master": m_ if isinstance(m_, str) and m_ else None}
+                          for k_, r_, m_ in zip(per_keys, e["Relates to"], e["Balance sheet account used in the books"])
+                          if lab2rel.get(r_, "same") != "same" or (isinstance(m_, str) and m_)}
+            st.caption("An earlier year must be before the year in which the books posted it; otherwise the same year is used.")
 
 
 

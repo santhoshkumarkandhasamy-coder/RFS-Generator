@@ -11,7 +11,8 @@ build(I, out_path) writes the workbook from the input dict I collected in the ap
   tbs            {"S"/"Y1"/"Y2"/"Y3": {"title": [..], "rows": [{name, op, dr, cr, cl (Dr +), master, op_master, group, dup}]}}
   custom_masters [{name, note, nature}]
   adjustments    [{date, lines [{master, particulars, dr, cr}], narration, working}]  (Rs. lakhs)
-  restatement    {gratuity {dbo {OPEN/Y3/..: Rs}, direct_reserve}, msme {p: Rs}, tax {p: Rs | "computed"}}  automatic entries
+  restatement    {gratuity {dbo {OPEN/Y3/..: Rs}, direct_reserve}, msme {p: Rs}, tax {p: Rs | "computed"},
+                  reserve_reversal {off, p: {relates "same"|"OPEN"|p, master}}}  automatic entries
   fa             {mode "standard", assets [...]} | {mode "mapped", source, sheet, map {...}, class_map {...}};  direct_reserve {p: Rs}
   shareholders   [{name, promoter, S, Y1, Y2, Y3}];  debtor_ageing / creditor_ageing {p: [[...]]} (Rs)
   current_maturities {p: Rs | "all"};  borrowings [{lender, nature, date, limit, roi, tenor, security, ledgers [], guarantee}]
@@ -83,6 +84,7 @@ def build(I, out_path):
         e = dict(e)
         e["manual"] = True
         entries.append(e)
+    entries += BAU.reserve_reversal(cx, entries)      # movements through the books' reserves -> profit of the period they relate to
     cx.entries = entries
     for e in entries:
         for ln in e["lines"]:
