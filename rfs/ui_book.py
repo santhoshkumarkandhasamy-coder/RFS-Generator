@@ -18,7 +18,7 @@ _SEQ = [0]
 def _k(key):
     """widget key unique within a run (several tables share a store key name, e.g. 'other')"""
     _SEQ[0] += 1
-    return f"nt_{key}_{_SEQ[0]}"
+    return f"nt_{key}_{_SEQ[0]}_{st.session_state.get('_fill_n', 0)}"
 
 
 def _f(v):
@@ -31,7 +31,10 @@ def _f(v):
 def per_table(store, key, label, pkeys, plab, num=True, help_=None):
     """one editable column keyed by period keys (Rs); stored in store[key] = {p: value}"""
     cur = store.setdefault(key, {})
-    df = pd.DataFrame({"Period / date": [plab(k) for k in pkeys], label: [cur.get(k) for k in pkeys]})
+    vals = [cur.get(k) for k in pkeys]
+    if not num:                                # text column: editor needs strings
+        vals = [None if v is None or (isinstance(v, float) and pd.isna(v)) else (f"{v:g}" if isinstance(v, float) else str(v)) for v in vals]
+    df = pd.DataFrame({"Period / date": [plab(k) for k in pkeys], label: pd.Series(vals, dtype=object if not num else "float64")})
     cfg = {label: st.column_config.NumberColumn(label, format="%.2f", help=help_) if num else st.column_config.TextColumn(label, help=help_)}
     e = st.data_editor(df, hide_index=True, width="stretch", key=_k(key), disabled=["Period / date"], column_config=cfg)
     store[key] = {k: (None if (v is None or (isinstance(v, float) and pd.isna(v)) or v == "") else (float(v) if num else v))
@@ -354,6 +357,9 @@ def make_input(ss, P, SLOTS, years, stub_end, tb_title):
     if tx:
         rst["tax"] = tx
     I["restatement"] = rst
+    has_register = (RST.get("fa_mode") == "mapped" and RST.get("fa_map_path")) or (RST.get("fa_mode") != "mapped" and RST.get("fa_assets"))
+    if has_register:          # the register generates the PPE entries: drop typed / imported ones marked 'FA Register'
+        I["adjustments"] = [e for e in I["adjustments"] if "fa register" not in (e.get("narration") or "").lower()]
     # fixed assets
     fad = {DK2P[k]: v for k, v in (RST.get("fa_direct") or {}).items() if v}
     if RST.get("fa_mode") == "mapped" and RST.get("fa_map_path"):

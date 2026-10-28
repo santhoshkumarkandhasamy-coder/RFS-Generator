@@ -619,6 +619,11 @@ def _ppe_fallback(cx, ws, r):
             for i, k in enumerate(keys):
                 w(ws, f"{CL(4 + i)}{r}", "=" + cx.tb(k, f"$C{r}"), fN, ACC)
             r += 1
+        if grp == "PPE" and PPE_M in cx.adj_masters:          # typed restatement entries on 'Property, Plant and Equipment'
+            w(ws, f"C{r}", "Restatement adjustments (refer Annexure V)")
+            for i, k in enumerate(keys):
+                w(ws, f"{CL(4 + i)}{r}", "=" + cx.adj_bs(qs(PPE_M), k, "Dr"), fN, ACC)
+            r += 1
         w(ws, f"C{r}", "Total (a)" if grp == "PPE" else "Total (b)", fB, bd=B_TB)
         for i, k in enumerate(keys):
             c = CL(4 + i)

@@ -230,3 +230,101 @@ def company_details(docs):
     if dirs:
         found["directors"] = ([{k: v for k, v in d.items() if k != "_src"} for d in dirs], ", ".join(sorted({d["_src"] for d in dirs})))
     return found
+
+
+# ------------------------------------------------------------------ Certificate of Incorporation (company data is taken only from it)
+_ORD = {w: i + 1 for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth "
+                                       "fifteenth sixteenth seventeenth eighteenth nineteenth twentieth".split())}
+_ORD.update({"twenty " + w: 20 + v for w, v in list(_ORD.items())[:9]})
+_ORD.update({"thirtieth": 30, "thirty first": 31, "thirty-first": 31})
+_ORD.update({k.replace(" ", "-"): v for k, v in list(_ORD.items())})
+_UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+                                     "seventeen eighteen nineteen".split())}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_MONTHS = "january february march april may june july august september october november december".split()
+
+
+def _year_words(t):
+    """'two thousand sixteen' -> 2016"""
+    w = t.lower().replace("-", " ").split()
+    total, cur = 0, 0
+    for x in w:
+        if x in _UNITS:
+            cur += _UNITS[x]
+        elif x in _TENS:
+            cur += _TENS[x]
+        elif x == "hundred":
+            cur *= 100
+        elif x == "thousand":
+            total += cur * 1000
+            cur = 0
+        elif x == "and":
+            continue
+        else:
+            break
+    return total + cur if total + cur > 1900 else None
+
+
+def _word_date(t):
+    """'Thirtieth day of November Two thousand sixteen' -> date"""
+    m = re.search(r"\b((?:twenty|thirty)[ -]?\w+|\w+)\s+day\s+of\s+(" + "|".join(_MONTHS) + r")[,\s]+((?:two|one)\s+thousand(?:\s+(?:and\s+)?[a-z\-]+){0,3})",
+                  t, re.I)
+    if not m:
+        return None
+    d = _ORD.get(m.group(1).lower().strip())
+    y = _year_words(m.group(3))
+    if d and y:
+        try:
+            return dt.date(y, _MONTHS.index(m.group(2).lower()) + 1, d)
+        except ValueError:
+            return None
+    return None
+
+
+def is_coi(name, text):
+    return bool(re.search(r"certificate\s+of\s+incorporation|\bcoi\b|incorporation[_\s-]*cert", (name or "") + " " + (text or "")[:3000], re.I))
+
+
+def coi_details(docs):
+    """{field: (value, document)} from the Certificate(s) of Incorporation only. The latest certificate (e.g. the fresh certificate on
+    conversion to a public company) gives the current name and CIN; the original incorporation date is kept."""
+    found = {}
+    certs = [(n, t) for n, t in docs.items() if t and is_coi(n, t)]
+    best_cin_date = None
+    for n, t in certs:
+        flat = re.sub(r"\s+", " ", t)
+        fresh = bool(re.search(r"fresh certificate|consequent upon (?:the )?(?:conversion|change of name)|name of the said company is this day changed", flat, re.I))
+        cins = CIN_RX.findall(flat)
+        issue = None
+        m = re.search(r"(?:given under my hand|dated?)\s+(?:at\s+[A-Za-z ]+?\s+)?(?:this|on)\s+(.{0,80})", flat, re.I)
+        if m:
+            issue = _word_date(m.group(1)) or _date(m.group(1))
+        inc = None
+        m = re.search(r"(?:originally\s+)?incorporated\s+on\s+(?:this\s+)?(.{0,90})", flat, re.I)
+        if m:
+            inc = _word_date(m.group(1)) or _date(m.group(1))
+        if inc and ("incorporation_date" not in found or (fresh and "originally" in flat.lower())):
+            found["incorporation_date"] = (inc.isoformat(), n)
+        new = re.search(r"(?:name of the said company is this day changed to|changed to)\s+(.{3,120}?(?:LIMITED|LLP|PRIVATE LIMITED))\b", flat, re.I)
+        orig = (re.search(r"changed from\s+([A-Z][A-Z0-9 &.,()'-]{2,120}?(?:PRIVATE LIMITED|LIMITED|LLP))\s+to\b", flat)
+                or re.search(r"certify that\s+(?:the\s+)?(?:M/s\.?\s*)?([A-Z][A-Z0-9 &.,()'-]{2,120}?(?:PRIVATE LIMITED|LIMITED|LLP))\b", flat))
+        if cins:
+            key = issue or dt.date(1900, 1, 1)
+            if fresh:
+                key = key.replace(year=key.year) if issue else dt.date(2999, 1, 1)
+            if best_cin_date is None or key >= best_cin_date:
+                best_cin_date = key
+                found["cin"] = (cins[-1] if fresh else cins[0], n)
+                if new:
+                    found["name"] = (new.group(1).strip().upper(), n)
+                    if orig and orig.group(1).strip().upper() != new.group(1).strip().upper():
+                        found["former"] = (f"(Formerly known as {orig.group(1).strip().title().replace(' Private Limited', ' Private Limited')})", n)
+                elif orig:
+                    found["name"] = (orig.group(1).strip().upper(), n)
+        m = re.search(r"Registrar of Companies,?\s*([A-Za-z][A-Za-z ]{2,40}?)(?:\s*(?:Mailing|Given|Digital|Note|\.|,|$))", flat)
+        if m and ("roc" not in found or "central processing" in found["roc"][0].lower()):     # the state ROC, not the CPC
+            found["roc"] = (m.group(1).strip(), n)
+        m = re.search(r"Mailing Address as per record available in Registrar of Companies office:?\s*(.{10,250}?)(?:\s*\*|\s*Note|$)", flat, re.I)
+        if m:
+            found["address"] = (m.group(1).strip(" ,"), n)
+    return found

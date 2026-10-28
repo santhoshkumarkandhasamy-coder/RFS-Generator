@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract, restate
+from rfs import import_rfs
 from rfs import book_core, book_masters, book_inputs, book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book
 
 
@@ -22,7 +23,7 @@ def _reload_if_updated():
     reload any module whose file changed since it was loaded."""
     import importlib
     for mod in (book_masters, classify, mapping, tally, docreader, regulatory, extract, restate, builder, exporters, book_core, book_inputs,
-                book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book):     # dependencies first
+                book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book, import_rfs):     # dependencies first
         try:
             m = os.path.getmtime(mod.__file__)
         except OSError:
@@ -106,13 +107,21 @@ LABELS = {"name": "Company name", "former": "Formerly known as", "cin": "CIN", "
           "face_value": "Face value (Rs)", "tax_rate": "Tax rate (115BAA)", "aud_firm": "Auditor - firm", "aud_frn": "Auditor - FRN",
           "aud_partner": "Auditor - partner", "aud_mno": "Auditor - membership no.", "aud_udin": "Auditor - UDIN",
           "aud_peer": "Auditor - peer review no.", "aud_place": "Auditor - place", "aud_date": "Auditor - date of signing",
-          "directors": "Directors"}
+          "directors": "Directors", "incorporation_date": "Date of incorporation", "roc": "Registrar of Companies"}
 
 
 def fill_from_documents():
     """Company tab fields from the uploaded documents; only empty fields are filled."""
     texts = {k: v.get("text", "") for k, v in ss.docs.items() if v.get("text")}
     found = extract.company_details(texts)
+    # company data only from the Certificate(s) of Incorporation; other documents give the auditor and directors
+    for f in ("name", "former", "cin", "address", "incorporated", "authorised_capital"):
+        found.pop(f, None)
+    coi = extract.coi_details(texts)
+    if not coi:
+        st.warning("No Certificate of Incorporation found among the uploaded documents - company name, CIN, incorporation date and ROC "
+                   "are not filled. Upload the certificate (and the fresh certificate on conversion, if any).")
+    found.update(coi)
     pr, aud, filled = ss.project, dict(ss.project.get("auditor", {})), []
     for f, (val, src) in found.items():
         if f.startswith("aud_"):
@@ -128,6 +137,9 @@ def fill_from_documents():
                 when = dt.date.fromisoformat(d).strftime("%B %d, %Y") if d[:4].isdigit() else ""
                 pr["background"] = (f"The Company was incorporated on {when} {act}".strip() + ".") if when else ""
                 filled.append(f)
+        elif f in ("incorporation_date", "roc", "name", "former", "cin", "address"):
+            if not pr.get(f):
+                pr[f] = val; filled.append(f)
         elif f == "latest":
             pr["latest"] = val.isoformat(); filled.append(f)
         elif f in ("authorised_capital",) and not pr.get(f):
@@ -145,8 +157,9 @@ def fill_from_documents():
 with tabs[0]:
     fb1, fb2 = st.columns([2, 3])
     if fb1.button("Fill company details from uploaded documents", disabled=not ss.docs,
-                  help="Reads the documents in Supporting documents / the sidebar upload (audited financials, auditor's report, "
-                       "MCA master data, board report ...). Only empty fields are filled."):
+                  help="Company name, former name, CIN, date of incorporation, ROC and address: only from the Certificate of Incorporation "
+                       "(and the fresh certificate on conversion). Auditor and directors: from the auditor's report / financial statements. "
+                       "Only empty fields are filled."):
         fill_from_documents()
         st.rerun()
     if not ss.docs:
@@ -170,7 +183,7 @@ with tabs[0]:
         objects = st.text_area("Main objects of the Company", P("objects", ""), height=100)
         i1, i2 = st.columns(2)
         inc_date = i1.date_input("Date of incorporation", dt.date.fromisoformat(P("incorporation_date")) if P("incorporation_date") else None,
-                                 min_value=dt.date(1900, 1, 1), key="inc_date")
+                                 min_value=dt.date(1900, 1, 1), key=f"inc_date{ss.get('_fill_n', 0)}")
         roc = i2.text_input("Registrar of Companies (e.g. Chennai)", P("roc", ""))
         cin_note = st.text_input("Note next to the CIN (e.g. earlier CIN before conversion)", P("cin_note", ""))
         exchange = st.text_input("Exchange / platform for the offer (e.g. SME Platform of NSE (NSE Emerge))", P("exchange", ""))
@@ -197,7 +210,7 @@ with tabs[0]:
         a1, a2 = st.columns(2)
         auditor = {
             "firm": a1.text_input("Firm name", aud.get("firm", "")), "frn": a2.text_input("FRN", aud.get("frn", "")),
-            "peer": a1.text_input("Peer review certificate no.", aud.get("peer", "")), "partner": a2.text_input("Partner", aud.get("partner", "")),
+            "peer": a1.text_input("Peer review certificate no.", aud.get("peer", "")), "partner": a2.text_input("1. Signatory - engagement partner", aud.get("partner", "")),
             "mno": a1.text_input("Membership no.", aud.get("mno", "")), "udin": a2.text_input("UDIN", aud.get("udin", "")),
             "sign_date": a1.text_input("Date of signing", aud.get("sign_date", "")), "place": a2.text_input("Place", aud.get("place", "")),
         }
@@ -210,15 +223,35 @@ with tabs[0]:
                                 num_rows="dynamic", width="stretch", key="sa_rep")
         sa["reports"] = [list(r) for r in rep_df.fillna("").values.tolist() if any(r)]
         pending = st.text_area("Inputs pending from the management (one per line - listed in red in MasterData)", P("pending", ""))
-    st.subheader("Directors / signatories")
-    st.caption("Row 1 and 2: directors signing the statements; row 3: CFO (and director); row 4: Company Secretary; then independent / other directors.")
-    dir_df = st.data_editor(pd.DataFrame(P("directors", [{"din": "", "name": "", "designation": "Director", "category": "Promoter", "signatory": "Yes"}])),
-                            num_rows="dynamic", width="stretch", key=f"dirs{ss.get('_fill_n', 0)}")
+    st.subheader("Signatories (5)")
+    st.caption("1. Auditor (partner, above)  2-3. Two directors  4. CFO  5. Company Secretary - they sign the restated statements. "
+               "Independent / other directors go in the table below (shown in related parties).")
+    people = list(P("directors", []))
+    while len(people) < 4:
+        people.append({})
+    roles = [("Director 1", "Director"), ("Director 2", "Director"), ("Chief Financial Officer", "Chief Financial Officer"), ("Company Secretary", "Company Secretary")]
+    sig = []
+    fn = ss.get("_fill_n", 0)
+    for i, (role, dflt) in enumerate(roles):
+        d = people[i] or {}
+        c_ = st.columns([2, 3, 2, 2, 1])
+        c_[0].markdown(f"**{i + 2}. {role}**")
+        sig.append({"name": c_[1].text_input("Name", d.get("name", ""), key=f"sg_n{i}_{fn}"),
+                    "designation": c_[2].text_input("Designation", d.get("designation") or dflt, key=f"sg_d{i}_{fn}",
+                                                    help="e.g. Managing Director, Whole-time Director, CFO & Director"),
+                    "din": c_[3].text_input("DIN (M.No. for CS)", d.get("din", ""), key=f"sg_din{i}_{fn}"),
+                    "category": d.get("category") or ("Promoter" if i < 2 else "-"), "signatory": "Yes"})
+        sig[-1]["category"] = c_[4].text_input("Category", sig[-1]["category"], key=f"sg_c{i}_{fn}")
+    st.caption("Other directors (independent / non-executive) - not signatories:")
+    oth = pd.DataFrame(people[4:] or [{"din": "", "name": "", "designation": "Independent Director", "category": "Non-executive", "signatory": "No"}],
+                       columns=["din", "name", "designation", "category", "signatory"])
+    dir_df = st.data_editor(oth, num_rows="dynamic", width="stretch", key=f"dirs{fn}")
+    all_people = sig + [r for r in dir_df.fillna("").to_dict("records") if r.get("name")]
     ss.project.update({"name": name, "former": former, "cin": cin, "address": address, "segment": segment, "background": background,
                        "objects": objects, "latest": latest.isoformat(), "authorised_capital": authorised, "face_value": fv,
                        "bonus_factor": bonus, "tax_rate": tax_rate, "closing_stock": closing_stock, "auditor": auditor,
                        "stub_end": stub_end.isoformat() if stub_end else None, "stub_closing_stock": stub_stock,
-                       "directors": dir_df.fillna("").to_dict("records"), "incorporation_date": inc_date.isoformat() if inc_date else None,
+                       "directors": all_people, "incorporation_date": inc_date.isoformat() if inc_date else None,
                        "roc": roc, "cin_note": cin_note, "exchange": exchange, "stat_auditor": sa, "pending": pending})
 
 years = {"d26": latest, "d25": latest.replace(year=latest.year - 1), "d24": latest.replace(year=latest.year - 2)}
@@ -323,16 +356,54 @@ def heading_text(f):
 
 
 # ---------------------------------------------------------------- sidebar upload: route files to TB slots / documents
+def is_rfs_workbook(f):
+    """an RFS workbook in this app's format (MasterData + BS_1 sheets)"""
+    if not f.name.lower().endswith((".xlsx", ".xlsm")):
+        return False
+    try:
+        import openpyxl
+        names = openpyxl.load_workbook(f, read_only=True).sheetnames
+        return "MasterData" in names and "BS_1" in names
+    except Exception:
+        return False
+    finally:
+        f.seek(0)
+
+
+def import_rfs_file(f, where):
+    pth = os.path.join(ss.workdir, "import_" + f.name)
+    with open(pth, "wb") as fh:
+        fh.write(f.getbuffer())
+    pr_, nt_, msg_ = import_rfs.import_workbook(pth)
+    ss.project.update({k: v for k, v in pr_.items() if v not in (None, "", [], {})})
+    ss.project.setdefault("notes", {}).update({k: v for k, v in nt_.items() if v not in (None, "", [], {})})
+    ss._fill_n = ss.get("_fill_n", 0) + 1
+    where.success(f"{f.name}: inputs imported - " + "; ".join(msg_) + ". Upload the trial balances; review tabs 2, 6, 8 and 9.")
+
+
 for up in quick or []:
     key = up.name + str(up.size)
     if up.name.lower().endswith(".json") or key in ss.setdefault("_quick_done", set()):
         continue
     ss._quick_done.add(key)
+    if is_rfs_workbook(up):
+        with st.spinner(f"Importing inputs from {up.name}..."):
+            try:
+                import_rfs_file(up, quick_msg)
+                ss._stub_auto = True          # rerun so every tab shows the imported values
+            except Exception as e:
+                quick_msg.error(f"{up.name}: could not import ({e})")
+        continue
     head = heading_text(up)
     period = tb_period(head)
     named_tb = bool(re.search(r"trial|\btb\b|tb[-_ ]", up.name, re.I))
     if period:                                   # the TB's own heading decides the year
         slot = slot_for_period(period)
+        if not slot and period[1] > years["d26"] and period[0] == years["d26"] + dt.timedelta(days=1):
+            ss.project["stub_end"] = period[1].isoformat()          # interim period after the latest year: switch the stub period on
+            slot = "FYS"
+            ss._stub_auto = True
+            quick_msg.info(f"{up.name}: stub period {period[0]:%d-%b-%Y} to {period[1]:%d-%b-%Y} - stub period switched on.")
         if not slot:
             quick_msg.warning(f"{up.name} covers {period[0]:%d-%b-%Y} to {period[1]:%d-%b-%Y}, which is not one of the three RFS years "
                               f"({', '.join(plabel(s_) for s_, _ in SLOTS)}). For a stub period, tick 'Include a stub period' in the "
@@ -369,13 +440,26 @@ for up in quick or []:
         err = add_doc(up)
     quick_msg.info(f"{up.name} -> supporting documents" + (f" (text not extracted: {err})" if err else ""))
 
+if ss.pop("_stub_auto", False):
+    st.rerun()
+
 # ---------------------------------------------------------------- 2. trial balances
 with tabs[1]:
     st.write("Upload the trial balance for each year in any format: Excel (.xlsx / .xls), CSV, Word (.docx / .doc), "
              "PowerPoint (.pptx / .ppt) or PDF. A Tally Excel export (Detailed view) is read as-is. Other files need columns for "
              "Particulars and Opening / Debit / Credit / Closing (Dr/Cr suffix or separate Dr and Cr columns); the group and "
              "ledger structure is rebuilt from the totals.")
-    cols = st.columns(len(SLOTS))
+    cols = st.columns(len(SLOTS) + (0 if stub_end else 1))
+    if not stub_end:
+        with cols[-1]:
+            st.markdown("**Stub period (optional)**")
+            st.caption("Interim period after the latest year end (e.g. April - September). Needed when the latest audited year is more than "
+                       "six months old at filing.")
+            sdef = latest.replace(year=latest.year + 1, month=9, day=30) if latest.month == 3 else latest
+            sd_new = st.date_input("Stub period ended", sdef, key="stub_tb_date")
+            if st.button("Add stub period", key="stub_add"):
+                ss.project["stub_end"] = sd_new.isoformat()
+                st.rerun()
     for (slot, lbl), col in zip(SLOTS, cols):
         with col:
             f = st.file_uploader(f"{lbl} - {plabel(slot)}", type=FILE_TYPES, key="tb_" + slot)
@@ -674,7 +758,7 @@ with tabs[3]:
         if k_ not in sh_df.columns:
             sh_df[k_] = 0
     sh_df = sh_df[list(sh_cols)]
-    sh_df = st.data_editor(sh_df, num_rows="dynamic", width="stretch", key="sh",
+    sh_df = st.data_editor(sh_df, num_rows="dynamic", width="stretch", key=f"sh{ss.get('_fill_n', 0)}",
                            column_config={k: st.column_config.Column(v) for k, v in sh_cols.items()} | {"promoter": st.column_config.CheckboxColumn("Promoter")})
     ss.project["shareholders"] = sh_df.fillna(0).to_dict("records")
 
@@ -687,7 +771,7 @@ with tabs[3]:
             data = [[(base[j][i] if j < len(base) and i < len(base[j]) else 0) for i in range(len(buckets))] for j in range(4)]
             df_ = pd.DataFrame(data, columns=buckets, index=rows_lbl)
             st.caption(f"As at {years[dk]:%B %d, %Y}")
-            e = st.data_editor(df_, width="stretch", key=f"{key}_{dk}")
+            e = st.data_editor(df_, width="stretch", key=f"{key}_{dk}_{ss.get('_fill_n', 0)}")
             out[dk] = e.fillna(0).values.tolist()
         ss.project[key] = out
 
@@ -709,7 +793,7 @@ with tabs[4]:
     adj_rows = P("adj_rows", [{"entry": 1, "date": years["d24"].isoformat(), "master": "Reserves and surplus", "particulars": "", "dr": 0.0, "cr": 0.0, "narration": ""}])
     adf = pd.DataFrame(adj_rows)
     adf["date"] = pd.to_datetime(adf["date"]).dt.date
-    adf = st.data_editor(adf, num_rows="dynamic", width="stretch", key="adj", column_config={
+    adf = st.data_editor(adf, num_rows="dynamic", width="stretch", key=f"adj{ss.get('_fill_n', 0)}", column_config={
         "entry": st.column_config.NumberColumn("Entry no.", step=1),
         "date": st.column_config.DateColumn("Date", format="DD-MM-YYYY"),
         "master": st.column_config.SelectboxColumn("Masters (note line)", options=options, width="large"),
