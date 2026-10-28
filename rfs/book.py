@@ -126,4 +126,9 @@ def build(I, out_path):
     wb.active = 1
     cx.resolve()
     wb.save(out_path)
+    global LAST_TEXTS
+    LAST_TEXTS = cx.text_used
     return out_path
+
+
+LAST_TEXTS = {}

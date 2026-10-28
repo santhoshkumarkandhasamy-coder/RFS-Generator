@@ -144,11 +144,10 @@ def rpt(cx):
         ns.line("Borrowings secured by personal guarantees of the directors (outstanding)",
                 lambda p, r: "=" + "+".join(f"'Borrowing Terms'!{cx.BTC[p]}{x}" for x in cx.BT_GUAR))
         ns.gap()
-    notes = R.get("notes")
-    if notes is None:
-        notes = [f"1. Related parties and transactions are as disclosed in the audited financial statements and the books of account."]
-        if any(all(d.get(p) in (None, "") for d in rem) for p in cx.PK) and rem:
-            notes.append("# Director-wise break-up of remuneration for the period is to be furnished by the management.")
+    notes = ["1. Related parties and transactions are as disclosed in the audited financial statements and the books of account."]
+    if any(all(d.get(p) in (None, "") for d in rem) for p in cx.PK) and rem:
+        notes.append("# Director-wise break-up of remuneration for the period is to be furnished by the management.")
+    notes = cx.text_list("rpt_notes", notes, "RPT - notes (one per line)")
     if notes:
         ns.sub("Notes:")
         for t in notes:
@@ -334,12 +333,11 @@ def gratuity(cx):
     ns.sub("i) Plan assets" if sens else "h) Plan assets")
     ns.para(cx.text("eb_plan", "The gratuity scheme is unfunded and the Company does not hold any plan assets; accordingly, the disclosures relating to the "
                                "fair value of plan assets and the return on plan assets are not applicable."), last_col=cx.LASTN)
-    gn = G.get("notes")
-    if gn is None:
-        gn = [f"1. Figures are as per the actuarial valuation reports for the respective years."]
-        if cx.stub and _n(CUR.get("S")) is None:
-            gn.append(f"2. Actuarial valuation as at {long_date(cx.stub)} is not available; the provision as at {long_date(cx.stub)} is carried at the "
-                      f"{long_date(cx.DATE['Y1'])} valuation (including its current / non-current classification).")
+    gn = [f"1. Figures are as per the actuarial valuation reports for the respective years."]
+    if cx.stub and _n(CUR.get("S")) is None:
+        gn.append(f"2. Actuarial valuation as at {long_date(cx.stub)} is not available; the provision as at {long_date(cx.stub)} is carried at the "
+                  f"{long_date(cx.DATE['Y1'])} valuation (including its current / non-current classification).")
+    gn = cx.text_list("eb_notes", gn, "Employee benefits - notes (one per line)")
     if gn:
         ns.gap()
         ns.sub("Notes:")
@@ -478,7 +476,7 @@ def acc_ratios(cx):
         dflt.append(f"4. The ratios for the period ended {long_date(cx.stub)} are not annualised.")
     dflt.append(f"{len([x for x in dflt if x[:2] in ('1.', '2.', '3.', '4.')]) + 1}. The figures disclosed above are based on the Restated Summary "
                 "Statements of the Company.")
-    for t in (cx.I.get("texts") or {}).get("ar_notes") or dflt:
+    for t in cx.text_list("ar_notes", dflt, "Accounting ratios - notes (one per line)"):
         ns.para(t)
     cx.finish_print(ws, ns.r)
 
@@ -795,9 +793,9 @@ def additional(cx):
         ws.row_dimensions[r].height = 30
         r += 1
     for key, dflt in ADD_DEFAULT:
-        t = T.get("add" + key, dflt)
+        t = dflt if dflt.startswith("TABLE_") else cx.text("add" + key, dflt, f"Additional disclosures {key}")
         if t == "TABLE_LOANS":
-            para(T.get("add(iii)_text", "(iii) Loans and advances in the nature of loans granted to promoters, directors, KMPs and related parties (repayable on "
+            para(cx.text("add(iii)_text", "(iii) Loans and advances in the nature of loans granted to promoters, directors, KMPs and related parties (repayable on "
                                         "demand or without specifying any terms or period of repayment):"))
             w(ws, f"C{r}", "Type of borrower", fB, bd=B_ALL)
             for p in cx.PK:
@@ -848,7 +846,7 @@ def additional(cx):
                     v = (FX.get(k) or {}).get(p)
                     w(ws, f"{cx.NC[p]}{r}", rs_f(v, S) if _n(v) is not None else (v if isinstance(v, str) else 0), fN, ACC, bd=B_B if i == 2 else None)
                 r += 1
-            fn = T.get("add(xv)_note")
+            fn = cx.text("add(xv)_note", "", "Additional disclosures (xv) - note under the table")
             if fn:
                 para(fn)
             r += 1

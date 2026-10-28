@@ -6,6 +6,7 @@ override any ledger in the app, and overrides are saved as JSON for reuse.
 """
 import re
 from .classify import classify
+from . import book_masters as BM
 
 LBL = {
     "SC": ("Equity share capital", "Cr", "BS"), "RS": ("Reserves and surplus", "Cr", "BS"),
@@ -57,18 +58,24 @@ MASTER_INFO.update({
     "Interest on delayed payments to MSME": ("Dr", "P&L"),
     "Directors' remuneration payable": ("Cr", "BS"),
 })
+for _m, (_nat, _grp, _note) in BM.catalogue().items():      # every master of the final RFS format
+    MASTER_INFO.setdefault(_m, (_nat, _grp))
+CUSTOM = []                         # custom masters [{name, note, nature}] set by the app
 DIRECTOR_PREFIX = "Loan from director - "
 EXCLUDE = "Not considered"
 CRED_PRIM = {"Capital Account", "Loans (Liability)", "Current Liabilities", "Sales Accounts", "Indirect Incomes"}
 
 
 def all_labels(extra=()):
-    return sorted(set(MASTER_INFO) | set(extra)) + [EXCLUDE]
+    return sorted(set(MASTER_INFO) | {c["name"] for c in CUSTOM} | set(extra)) + [EXCLUDE]
 
 
 def label_info(label):
     if label.startswith(DIRECTOR_PREFIX):
         return ("Cr", "BS")
+    i = BM.info(label, CUSTOM)
+    if i:
+        return i[0], i[1]
     return MASTER_INFO[label]
 
 

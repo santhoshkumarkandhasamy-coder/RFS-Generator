@@ -14,13 +14,15 @@ import pandas as pd
 import streamlit as st
 
 from rfs import tally, builder, mapping, exporters, docreader, regulatory, classify, extract, restate
+from rfs import book_core, book_masters, book_inputs, book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book
 
 
 def _reload_if_updated():
     """After a git pull while the app is running, Streamlit re-runs app.py but keeps the old rfs modules in memory:
     reload any module whose file changed since it was loaded."""
     import importlib
-    for mod in (classify, mapping, tally, docreader, regulatory, extract, restate, builder, exporters):     # dependencies first
+    for mod in (book_masters, classify, mapping, tally, docreader, regulatory, extract, restate, builder, exporters, book_core, book_inputs,
+                book_notes, book_fa, book_statements, book_annex, book_auto, book, ui_book):     # dependencies first
         try:
             m = os.path.getmtime(mod.__file__)
         except OSError:
@@ -93,9 +95,10 @@ with st.sidebar:
                 st.error(f"Could not save: {e}")
 
 TABS = st.tabs(["1. ICDR & DRHP check", "2. Company", "3. Trial balances", "4. Supporting documents", "5. Mapping review",
-                "6. Shareholders & ageing", "7. Restatement", "8. Adjustments", "9. Generate"])
-reg_tab, docs_tab, rst_tab = TABS[0], TABS[3], TABS[6]
-tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[7], TABS[8]]
+                "6. Shareholders & ageing", "7. Restatement", "8. Adjustments", "9. Notes inputs", "10. Texts", "11. Generate"])
+reg_tab, docs_tab, rst_tab, notes_tab, texts_tab = TABS[0], TABS[3], TABS[6], TABS[8], TABS[9]
+tabs = [TABS[1], TABS[2], TABS[4], TABS[5], TABS[7], TABS[10]]
+mapping.CUSTOM[:] = [c for c in (ss.project.get("notes", {}).get("custom_masters") or []) if c.get("name") and c.get("note")]
 
 # ---------------------------------------------------------------- 1. company
 LABELS = {"name": "Company name", "former": "Formerly known as", "cin": "CIN", "address": "Registered address",
@@ -162,8 +165,15 @@ with tabs[0]:
         cin = st.text_input("CIN", P("cin", ""))
         address = st.text_area("Registered address", P("address", ""))
         segment = st.text_input("Business segment (for segment policy)", P("segment", ""))
-        background = st.text_area("Background (incorporation, conversion, registered office)", P("background", ""), height=120)
+        background = st.text_area("Background (incorporation, conversion, registered office) - blank: built from the fields below",
+                                  P("background", ""), height=120)
         objects = st.text_area("Main objects of the Company", P("objects", ""), height=100)
+        i1, i2 = st.columns(2)
+        inc_date = i1.date_input("Date of incorporation", dt.date.fromisoformat(P("incorporation_date")) if P("incorporation_date") else None,
+                                 min_value=dt.date(1900, 1, 1), key="inc_date")
+        roc = i2.text_input("Registrar of Companies (e.g. Chennai)", P("roc", ""))
+        cin_note = st.text_input("Note next to the CIN (e.g. earlier CIN before conversion)", P("cin_note", ""))
+        exchange = st.text_input("Exchange / platform for the offer (e.g. SME Platform of NSE (NSE Emerge))", P("exchange", ""))
     with c2:
         st.subheader("RFS period and inputs")
         latest = st.date_input("Latest year end", dt.date.fromisoformat(P("latest", "2026-03-31")))
@@ -191,14 +201,25 @@ with tabs[0]:
             "mno": a1.text_input("Membership no.", aud.get("mno", "")), "udin": a2.text_input("UDIN", aud.get("udin", "")),
             "sign_date": a1.text_input("Date of signing", aud.get("sign_date", "")), "place": a2.text_input("Place", aud.get("place", "")),
         }
-    st.subheader("Directors / signatories (first two sign the statements)")
+    with st.expander("Statutory auditor of the audited financial statements and pending inputs"):
+        sa = P("stat_auditor", {}) or {}
+        s1, s2, s3 = st.columns(3)
+        sa = {"firm": s1.text_input("Statutory auditor - firm", sa.get("firm", "")), "frn": s2.text_input("Statutory auditor - FRN", sa.get("frn", "")),
+              "partner": s3.text_input("Partner / M.No.", sa.get("partner", "")), "reports": sa.get("reports") or []}
+        rep_df = st.data_editor(pd.DataFrame(sa["reports"] or [["Audit report FY ", ""]], columns=["Report", "Details (date, UDIN, opinion)"]),
+                                num_rows="dynamic", width="stretch", key="sa_rep")
+        sa["reports"] = [list(r) for r in rep_df.fillna("").values.tolist() if any(r)]
+        pending = st.text_area("Inputs pending from the management (one per line - listed in red in MasterData)", P("pending", ""))
+    st.subheader("Directors / signatories")
+    st.caption("Row 1 and 2: directors signing the statements; row 3: CFO (and director); row 4: Company Secretary; then independent / other directors.")
     dir_df = st.data_editor(pd.DataFrame(P("directors", [{"din": "", "name": "", "designation": "Director", "category": "Promoter", "signatory": "Yes"}])),
                             num_rows="dynamic", width="stretch", key=f"dirs{ss.get('_fill_n', 0)}")
     ss.project.update({"name": name, "former": former, "cin": cin, "address": address, "segment": segment, "background": background,
                        "objects": objects, "latest": latest.isoformat(), "authorised_capital": authorised, "face_value": fv,
                        "bonus_factor": bonus, "tax_rate": tax_rate, "closing_stock": closing_stock, "auditor": auditor,
                        "stub_end": stub_end.isoformat() if stub_end else None, "stub_closing_stock": stub_stock,
-                       "directors": dir_df.fillna("").to_dict("records")})
+                       "directors": dir_df.fillna("").to_dict("records"), "incorporation_date": inc_date.isoformat() if inc_date else None,
+                       "roc": roc, "cin_note": cin_note, "exchange": exchange, "stat_auditor": sa, "pending": pending})
 
 years = {"d26": latest, "d25": latest.replace(year=latest.year - 1), "d24": latest.replace(year=latest.year - 2)}
 YKEY = {"FY26": "d26", "FY25": "d25", "FY24": "d24", "FYS": "dS"}
@@ -745,7 +766,27 @@ with rst_tab:
              "leave a section empty to skip it.")
     per_keys = [YKEY[s_] for s_ in CHRON_SLOTS]
 
-    with st.expander("1. Fixed asset register - depreciation restated as per Schedule II (WDV)", expanded=bool(RST.get("fa_assets"))):
+    with st.expander("1. Fixed asset register - depreciation restated as per Schedule II (WDV)", expanded=bool(RST.get("fa_assets") or RST.get("fa_map_path"))):
+        RST["fa_mode"] = "mapped" if st.radio("Register", ["Standard template - the app computes Schedule II WDV for each asset",
+                                                           "Client's own register - use its WDV / depreciation columns"],
+                                              index=1 if RST.get("fa_mode") == "mapped" else 0, key="fa_mode") .startswith("Client") else "standard"
+    if RST.get("fa_mode") == "mapped":
+      with st.expander("Client's register - column mapping", expanded=True):
+        fum = st.file_uploader("Client's fixed asset register (Excel)", type=["xlsx", "xlsm"], key="fam_up")
+        if fum is not None and ss.get("_fam_loaded") != fum.name + str(fum.size):
+            pth = os.path.join(ss.workdir, "far_" + fum.name)
+            with open(pth, "wb") as fh:
+                fh.write(fum.getbuffer())
+            RST["fa_map_path"] = pth
+            ss._fam_loaded = fum.name + str(fum.size)
+        if RST.get("fa_map_path") and os.path.exists(RST["fa_map_path"]):
+            st.caption(f"Register: {os.path.basename(RST['fa_map_path'])} - copied into the 'FA Register' sheet as it is; normalised columns are added.")
+            ui_book.fa_mapped_ui(ss, RST, SLOTS, plabel, RST["fa_map_path"])
+            _per_table("fa_direct", "PPE through reserves in books (Rs)", per_keys, date_lab)
+        elif RST.get("fa_map_path"):
+            st.warning("Upload the register again (files are not kept between sessions).")
+    with st.expander("Standard register - asset list", expanded=False) if RST.get("fa_mode") != "mapped" else st.container():
+      if RST.get("fa_mode") != "mapped":
         fu = st.file_uploader("Fixed asset register (Excel, CSV, PDF, Word)", type=FILE_TYPES, key="fa_up")
         cand = [k for k in ss.docs if re.search(r"fixed asset|fa[ _-]?(details|register)|asset register|\bfar\b", k, re.I)]
         pick = st.selectbox("...or read it from the supporting documents", ["-"] + cand, key="fa_pick")
@@ -846,22 +887,54 @@ with rst_tab:
             RST["tax_stub_computed"] = st.checkbox("Stub period: provide current tax on the restated taxable income ('Tax Computation' sheet)",
                                                    value=bool(RST.get("tax_stub_computed")), key="t_stub")
 
-    with st.expander("5. Borrowing terms - from sanction letters", expanded=bool(RST.get("borrowings"))):
-        if st.button("Read from sanction letters in supporting documents", key="b_read"):
-            got = [restate.read_sanction(d_.get("text", ""), k_) for k_, d_ in ss.docs.items() if re.search(r"sanction", k_ + " " + d_.get("text", "")[:2000], re.I)]
-            RST["borrowings"] = (RST.get("borrowings") or []) + got
-            (st.success if got else st.info)(f"{len(got)} sanction letter(s) read." if got else "No sanction letter found - add rows below.")
-        led_opts = [""]
-        if ready:
-            BORR = {"Term loans from banks and NBFCs (secured)", "Overdraft facilities from banks (secured)", "Bill discounting and channel finance (secured)"}
-            led_opts += sorted({x["name"] for s_, _ in SLOTS for x in ss.tb[s_] if x["inc"]
-                                for m in [mapping.master_for(x, 3, ss.overrides)] if m and (m[0] in BORR or m[0].startswith(mapping.DIRECTOR_PREFIX))})
-        bdf = pd.DataFrame(RST.get("borrowings") or [], columns=["lender", "facility", "sanctioned", "rate", "tenure", "security", "guarantee", "ledger"])
-        be = st.data_editor(bdf, num_rows="dynamic", width="stretch", key="b_grid", column_config={
-            "lender": "Lender", "facility": "Nature of facility", "sanctioned": st.column_config.NumberColumn("Sanctioned (Rs)", format="%.2f"),
-            "rate": "Rate of interest", "tenure": "Repayment / tenure", "security": st.column_config.TextColumn("Security", width="large"),
-            "guarantee": "Guarantee", "ledger": st.column_config.SelectboxColumn("TB ledger (outstanding)", options=led_opts, width="medium")})
-        RST["borrowings"] = [r for r in be.where(pd.notna(be), None).to_dict("records") if r.get("lender") or r.get("facility")]
+
+
+def tb_title(slot):
+    """first lines of the (normalised) trial balance: company, 'Trial Balance', period"""
+    try:
+        import openpyxl
+        ws_ = openpyxl.load_workbook(ss.tbfile[slot], read_only=True).worksheets[0]
+        vals = [str(r[0]) for r in ws_.iter_rows(min_row=1, max_row=3, max_col=1, values_only=True) if r and r[0]]
+        return (vals + ["", "", ""])[:3]
+    except Exception:
+        return [ss.project.get("name", ""), "Trial Balance", ""]
+
+
+def tb_ledgers():
+    """TB ledgers by use, for the notes inputs (borrowings, other income)"""
+    out = {"borrow": set(), "oi": []}
+    if not ready:
+        return {"borrow": [], "oi": []}
+    BORR = {"Term loans from banks and NBFCs (secured)", "Overdraft facilities from banks (secured)", "Bill discounting and trade finance loans (secured)",
+            "Purchase bill finance and channel finance (unsecured)"}
+    seen = set()
+    for s_, _ in SLOTS:
+        for x in ss.tb[s_]:
+            if not x["inc"]:
+                continue
+            m = mapping.master_for(x, 3, ss.overrides)
+            if not m:
+                continue
+            if m[0] in BORR:
+                out["borrow"].add(x["name"])
+            if m[0] in ("Interest income", "Other non-operating income") and (m[0], x["name"]) not in seen:
+                seen.add((m[0], x["name"]))
+                out["oi"].append((m[0], x["name"]))
+    return {"borrow": sorted(out["borrow"]), "oi": out["oi"]}
+
+
+with notes_tab:
+    if st.button("Read borrowings from sanction letters in supporting documents", key="b_read2"):
+        got = [restate.read_sanction(d_.get("text", ""), k_) for k_, d_ in ss.docs.items() if re.search(r"sanction", k_ + " " + d_.get("text", "")[:2000], re.I)]
+        NB = ss.project.setdefault("notes", {}).setdefault("borrowings", [])
+        for g_ in got:
+            NB.append({"lender": g_.get("lender"), "nature": g_.get("facility"), "limit_rs": g_.get("sanctioned"), "roi": g_.get("rate"),
+                       "tenor": g_.get("tenure"), "security": g_.get("security"), "guarantee": bool(g_.get("guarantee")), "ledgers": g_.get("ledger") or ""})
+        (st.success if got else st.info)(f"{len(got)} sanction letter(s) read." if got else "No sanction letter found - add rows below.")
+    ui_book.notes_tab(ss, P, SLOTS, plabel, years, ready, tb_ledgers())
+
+with texts_tab:
+    ui_book.texts_tab(ss)
 
 
 def restatement_cfg():
@@ -899,14 +972,11 @@ with tabs[5]:
     if not ready: problems.append("Upload all the trial balances" + (" (including the stub period)." if stub_end else "."))
     if not name or not cin: problems.append("Company name and CIN are required.")
     if ready:
-        known = set(mapping.MASTER_INFO) | {mapping.EXCLUDE}
+        known = set(mapping.MASTER_INFO) | {mapping.EXCLUDE} | {c["name"] for c in mapping.CUSTOM}
         bad = {v for o in ss.overrides.values() for v in (o["dr"], o["cr"]) if v not in known and not str(v).startswith(mapping.DIRECTOR_PREFIX)}
         if bad: problems.append("Unknown masters in mapping: " + ", ".join(sorted(bad)))
     for p_ in problems:
         st.warning(p_)
-    dbo_ = RST.get("dbo") or {}
-    if any(v not in (None, "") for v in dbo_.values()) and "gratuity" not in restatement_cfg():
-        st.info("Gratuity restatement is skipped: enter the obligation for every date (including the opening date) in tab 7.")
     FORMATS = {"Excel (.xlsx)": "xlsx", "Word (.docx)": "docx", "Word 97-2003 (.doc)": "doc", "PowerPoint (.pptx)": "pptx", "HTML (.html)": "html"}
     engine = exporters.recalc_engine()
     chosen = st.multiselect("Output formats", list(FORMATS), default=["Excel (.xlsx)"])
@@ -928,8 +998,8 @@ with tabs[5]:
         upto = f"{stub_end:%b-%y}" if stub_end else fy_label(years['d26'])[3:]
         out = os.path.join(run_dir, f"{(name or 'Company').replace(' ', '_')}_RFS_{fy_label(years['d24'])[3:]}_to_{upto}.xlsx")
         with st.spinner("Building workbook..."):
-            keys_ = [s_ for s_, _ in SLOTS]
-            builder.build(cfg, {k: ss.tb[k] for k in keys_}, {k: ss.tbfile[k] for k in keys_}, out, ss.overrides)
+            book.build(ui_book.make_input(ss, P, SLOTS, years, stub_end, tb_title), out)
+            ss.text_defaults = book.LAST_TEXTS
             exporters.add_reference_sheet(out, ss.regcheck, ss.docs,
                                           {plabel(s_): ss.get("tbsrc_" + s_, os.path.basename(ss.tbfile.get(s_, ""))) for s_, _ in SLOTS})
         with st.spinner("Preparing output files..."):

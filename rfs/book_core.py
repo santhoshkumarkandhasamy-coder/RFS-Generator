@@ -122,6 +122,7 @@ class Ctx:
         self.tbval = {}                                  # (pk, master) -> lakhs (python-side, for nil-line removal)
         self.custom = I.get("custom_masters", [])
         self.texts = dict(I.get("texts") or {})
+        self.text_used = {}
         self.wb = Workbook()
         self.wb.remove(self.wb.active)
 
@@ -247,9 +248,16 @@ class Ctx:
         return self._groups(self.BS_GROUPS, set(m for m in self.adj_masters if m not in self.adj_pl_masters and m != "Reserves and surplus"))
 
     # ---------------------------------------------------------------- texts
-    def text(self, key, default):
+    def text(self, key, default, label=None):
+        """editable paragraph: the user's text if given, else the default (recorded so the app can show every default)"""
+        self.text_used[key] = {"default": default, "label": label or key}
         v = self.texts.get(key)
         return default if v in (None, "") else v
+
+    def text_list(self, key, default, label=None):
+        """list of paragraphs, edited as one text (one paragraph per line)"""
+        t = self.text(key, "\n".join(x for x in default if x), label)
+        return [x for x in str(t).split("\n") if x.strip()]
 
     # ---------------------------------------------------------------- sheets / writers
     def sheet(self, name, widths, print_cols=None, portrait=True):

@@ -504,7 +504,7 @@ def notes_ppe(cx):
         "Gross block and accumulated depreciation are as per the Fixed Asset Register.",
         "The Company has not revalued its Property, Plant and Equipment or intangible assets during the years presented.",
     ]
-    for i, t in enumerate(cx.I.get("texts", {}).get("ppe_notes") or dflt):
+    for i, t in enumerate(cx.text_list("ppe_notes", dflt, "Note 12 (PPE) - notes (one per line)")):
         if not t:
             continue
         merge(ws, f"C{r}:M{r}", t, fN, A_J, est_height(t, 160))
