@@ -68,6 +68,7 @@ with st.sidebar:
                                   "placed in the year found in the file name or heading (e.g. FY 2025-26, 25-26); other files go to "
                                   "Supporting documents. You can also upload in tabs 3 and 4.")
     quick_msg = st.container()
+    log_box = st.empty()                 # document load log (filled at the end of the run)
     for up in quick or []:
         if up.name.lower().endswith(".json") and ss.get("_loaded") != up.name + str(up.size):
             proj = json.load(up)
@@ -356,6 +357,55 @@ def heading_text(f):
 
 
 # ---------------------------------------------------------------- sidebar upload: route files to TB slots / documents
+class Loader:
+    """progress of reading uploaded documents: current file, elapsed / estimated time left, a notification when done and a load log"""
+
+    def __init__(self, files, where):
+        import time
+        self.t0, self.time = time.time(), time
+        self.files = list(files)
+        self.total = sum(max(getattr(f, "size", 0), 1) for f in self.files)
+        self.done_bytes, self.n = 0, 0
+        self.box = where.status(f"Loading {len(self.files)} document(s)...", expanded=True)
+        self.bar = self.box.progress(0.0)
+        self.line = self.box.empty()
+
+    def _eta(self, cur_size):
+        el = self.time.time() - self.t0
+        rate = (el / self.done_bytes) if self.done_bytes else 1.5 / 1e6          # seconds per byte (1.5 s / MB before the first file)
+        return el, max(0.0, rate * (self.total - self.done_bytes))
+
+    def step(self, f):
+        import contextlib
+        me = self
+
+        @contextlib.contextmanager
+        def cm():
+            me.n += 1
+            size = max(getattr(f, "size", 0), 1)
+            el, left = me._eta(size)
+            me.line.write(f"Reading {me.n} of {len(me.files)}: **{f.name}** ({size / 1e6:.1f} MB) - elapsed {el:.0f} s, about {left:.0f} s left")
+            t = me.time.time()
+            res = "Loaded"
+            try:
+                yield
+            except Exception as e:
+                res = f"Failed: {e}"
+                me.box.error(f"{f.name}: {e}")
+            finally:
+                sec = me.time.time() - t
+                me.done_bytes += size
+                me.bar.progress(min(1.0, me.done_bytes / me.total), text=f"{me.n} of {len(me.files)} done")
+                ss.setdefault("load_log", []).insert(0, {"Document": f.name, "Size (MB)": round(size / 1e6, 2), "Seconds": round(sec, 1),
+                                                         "Result": res, "Loaded at": dt.datetime.now().strftime("%d-%m-%Y %H:%M:%S")})
+        return cm()
+
+    def done(self):
+        el = self.time.time() - self.t0
+        self.box.update(label=f"Loaded {len(self.files)} document(s) in {el:.0f} s", state="complete", expanded=False)
+        st.toast(f"{len(self.files)} document(s) loaded in {el:.0f} s", icon="✅")
+
+
 def is_rfs_workbook(f):
     """an RFS workbook in this app's format (MasterData + BS_1 sheets)"""
     if not f.name.lower().endswith((".xlsx", ".xlsm")):
@@ -381,11 +431,8 @@ def import_rfs_file(f, where):
     where.success(f"{f.name}: inputs imported - " + "; ".join(msg_) + ". Upload the trial balances; review tabs 2, 6, 8 and 9.")
 
 
-for up in quick or []:
-    key = up.name + str(up.size)
-    if up.name.lower().endswith(".json") or key in ss.setdefault("_quick_done", set()):
-        continue
-    ss._quick_done.add(key)
+def route_upload(up):
+    """one file from the sidebar upload: RFS workbook import, trial balance, or supporting document"""
     if is_rfs_workbook(up):
         with st.spinner(f"Importing inputs from {up.name}..."):
             try:
@@ -393,7 +440,7 @@ for up in quick or []:
                 ss._stub_auto = True          # rerun so every tab shows the imported values
             except Exception as e:
                 quick_msg.error(f"{up.name}: could not import ({e})")
-        continue
+        return
     head = heading_text(up)
     period = tb_period(head)
     named_tb = bool(re.search(r"trial|\btb\b|tb[-_ ]", up.name, re.I))
@@ -424,7 +471,7 @@ for up in quick or []:
                     ok = abs(op) < 1 and abs(cl) < 1 and abs(drs - crs) < 1 and sum(1 for x in ss.tb[slot] if x["inc"]) >= 10
                     if named_tb or ok:
                         quick_msg.success(f"{up.name} -> trial balance {plabel(slot)}")
-                        continue
+                        return
                     raise ValueError("not a trial balance")
                 except Exception as e:
                     keys, tb_, tf_ = before          # put back whatever was in the slot
@@ -439,6 +486,17 @@ for up in quick or []:
     with st.spinner(f"Reading {up.name}..."):
         err = add_doc(up)
     quick_msg.info(f"{up.name} -> supporting documents" + (f" (text not extracted: {err})" if err else ""))
+
+
+
+pending_quick = [up for up in (quick or []) if not up.name.lower().endswith(".json") and up.name + str(up.size) not in ss.setdefault("_quick_done", set())]
+if pending_quick:
+    L_ = Loader(pending_quick, quick_msg)
+    for up in pending_quick:
+        ss._quick_done.add(up.name + str(up.size))
+        with L_.step(up):
+            route_upload(up)
+    L_.done()
 
 if ss.pop("_stub_auto", False):
     st.rerun()
@@ -464,7 +522,8 @@ with tabs[1]:
         with col:
             f = st.file_uploader(f"{lbl} - {plabel(slot)}", type=FILE_TYPES, key="tb_" + slot)
             if f is not None and ss.get("tbname_" + slot) != f.name + str(f.size):
-                with st.spinner("Reading trial balance..."):
+                L_ = Loader([f], st)
+                with L_.step(f):
                     try:
                         per = tb_period(heading_text(f))
                         if per and years[YKEY[slot]] != per[1]:
@@ -473,6 +532,7 @@ with tabs[1]:
                         load_tb(slot, f)
                     except Exception as e:
                         st.error(f"Could not read {f.name}: {e}")
+                L_.done()
             if slot in ss.tb:
                 op, drs, crs, cl = tally.tb_check(ss.tb[slot])
                 n = sum(1 for x in ss.tb[slot] if x["inc"])
@@ -667,13 +727,15 @@ with docs_tab:
              "statements, sanction letters, actuarial reports, ageing, tax computations, related party details, etc. "
              "Text is extracted so you can search them while completing the inputs; the list is recorded in the output workbook.")
     ups = st.file_uploader("Supporting documents", type=FILE_TYPES, accept_multiple_files=True, key="docs_upload")
-    for f in ups or []:
-        if f.name in ss.docs:
-            continue
-        with st.spinner(f"Reading {f.name}..."):
-            err = add_doc(f)
-        if err:
-            st.warning(f"{f.name}: text could not be extracted ({err}). It is still listed.")
+    new_docs = [f for f in ups or [] if f.name not in ss.docs]
+    if new_docs:
+        L_ = Loader(new_docs, st)
+        for f in new_docs:
+            with L_.step(f):
+                err = add_doc(f)
+            if err:
+                st.warning(f"{f.name}: text could not be extracted ({err}). It is still listed.")
+        L_.done()
     if ss.docs:
         cats = ["", "Audited financial statements", "Trial balance", "Sanction letter / loan statement", "Actuarial report",
                 "Ageing", "Tax computation / ITR / 3CD", "Related party", "Fixed asset register", "Contingent liabilities",
@@ -1129,3 +1191,14 @@ with tabs[5]:
                 col.download_button(f"Download {label[fmt]}", fh.read(), os.path.basename(path), mime=mime[fmt], key="dl_" + fmt)
         st.caption("Excel: every figure is a formula linked to the TB sheets - review the yellow input cells and grey check cells. "
                    "Word / HTML carry all annexures and notes; PowerPoint is a summary deck (statements, adjustments, ratios, capitalisation).")
+
+
+# ---------------------------------------------------------------- document load log (sidebar)
+if ss.get("load_log"):
+    with log_box.expander(f"Document load log ({len(ss.load_log)})"):
+        tot = sum(x["Seconds"] for x in ss.load_log)
+        st.caption(f"Total reading time {tot:.0f} s - latest first.")
+        for x in ss.load_log[:50]:
+            mark = "✅" if x["Result"] == "Loaded" else "⚠️"
+            st.markdown(f"{mark} **{x['Seconds']:.1f} s** - {x['Document']}  \n<small>{x['Size (MB)']:.2f} MB, {x['Loaded at']}"
+                        + ("" if x["Result"] == "Loaded" else f", {x['Result']}") + "</small>", unsafe_allow_html=True)
