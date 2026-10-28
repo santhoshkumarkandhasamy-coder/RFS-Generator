@@ -45,8 +45,16 @@ def import_workbook(path):
         md, mv = wb["MasterData"], wv["MasterData"]
         lab = {str(md[f"A{r}"].value).strip().lower(): r for r in range(1, 60) if md[f"A{r}"].value}
         g = lambda key: next((mv[f"B{r}"].value for k, r in lab.items() if k.startswith(key)), None)
+        def num(v, lo=None, hi=None):
+            """a number within the range, else None (another layout has something else in that row)"""
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None
+            return v if (lo is None or v >= lo) and (hi is None or v <= hi) else None
+        tr = num(g("tax rate"), 0, 1)
+        if tr is None and "tax" in str(md["A17"].value or "").lower():
+            tr = num(mv["B17"].value, 0, 1)
         pr.update({"cin": g("cin"), "name": g("company name"), "former": g("formerly"), "address": g("registered address"),
-                   "face_value": g("face value"), "bonus_factor": g("bonus"), "tax_rate": mv["B17"].value})
+                   "face_value": num(g("face value"), 0), "bonus_factor": num(g("bonus"), 0), "tax_rate": tr})
         y1 = g("year ended (latest)")
         if isinstance(y1, dt.datetime):
             pr["latest"] = y1.date().isoformat()

@@ -59,6 +59,15 @@ def P(key, default=None):
     return ss.project.get(key, default)
 
 
+def PN(key, default=0.0):
+    """numeric project value; a blank or non-numeric saved value (e.g. a date read from another workbook) falls back to the default"""
+    v = ss.project.get(key)
+    try:
+        return float(str(v).replace(",", "").strip().rstrip("%")) / (100 if str(v).strip().endswith("%") else 1) if v not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 # ---------------------------------------------------------------- sidebar: project file
 with st.sidebar:
     st.header("RFS Generator")
@@ -193,11 +202,11 @@ with tabs[0]:
         st.subheader("RFS period and inputs")
         latest = st.date_input("Latest year end", dt.date.fromisoformat(P("latest", "2026-03-31")))
         st.caption(f"Years covered: {fy_label(latest)}, {fy_label(latest.replace(year=latest.year - 1))}, {fy_label(latest.replace(year=latest.year - 2))}")
-        authorised = st.number_input("Authorised capital (Rs)", value=float(P("authorised_capital", 0.0)), step=100000.0)
-        fv = st.number_input("Face value per share (Rs)", value=float(P("face_value", 10.0)))
-        bonus = st.number_input("Bonus / split factor after latest year end (1 = none)", value=float(P("bonus_factor", 1.0)))
-        tax_rate = st.number_input("Tax rate (e.g. 0.25168 for Sec 115BAA)", value=float(P("tax_rate", 0.25168)), format="%.5f")
-        closing_stock = st.number_input("Closing stock at latest year end (Rs) - not in Tally TB", value=float(P("closing_stock", 0.0)))
+        authorised = st.number_input("Authorised capital (Rs)", value=PN("authorised_capital", 0.0), step=100000.0)
+        fv = st.number_input("Face value per share (Rs)", value=PN("face_value", 10.0))
+        bonus = st.number_input("Bonus / split factor after latest year end (1 = none)", value=PN("bonus_factor", 1.0))
+        tax_rate = st.number_input("Tax rate (e.g. 0.25168 for Sec 115BAA)", value=PN("tax_rate", 0.25168), format="%.5f")
+        closing_stock = st.number_input("Closing stock at latest year end (Rs) - not in Tally TB", value=PN("closing_stock", 0.0))
         if not closing_stock:
             st.caption(":orange[Closing stock at the latest year end is blank - enter it unless the company holds no stock.]")
         has_stub = st.checkbox("Include a stub period (interim period after the latest year end)", value=bool(P("stub_end")),
@@ -206,7 +215,7 @@ with tabs[0]:
         if has_stub:
             sd = P("stub_end") or latest.replace(month=9, day=30).isoformat()
             stub_end = st.date_input("Stub period ended", dt.date.fromisoformat(sd))
-            stub_stock = st.number_input("Closing stock at the stub period end (Rs)", value=float(P("stub_closing_stock", 0.0)))
+            stub_stock = st.number_input("Closing stock at the stub period end (Rs)", value=PN("stub_closing_stock", 0.0))
             if not stub_stock:
                 st.warning("Stub period closing stock is blank: the stub period's purchases are then charged in full and the profit drops by "
                            "the whole stock (a large loss). Enter it from the stock statement / books, unless there really is no stock.")
@@ -431,6 +440,12 @@ def import_rfs_file(f, where):
     with open(pth, "wb") as fh:
         fh.write(f.getbuffer())
     pr_, nt_, msg_ = import_rfs.import_workbook(pth)
+    cin_new, cin_cur = str(pr_.get("cin") or "").strip().upper(), str(ss.project.get("cin") or "").strip().upper()
+    same_co = lambda a, b: re.sub(r"(PTC|PLC|OPC|FTC|GOI|SGC|NPL|ULL|ULT|GAP|GAT)", "", a) == re.sub(r"(PTC|PLC|OPC|FTC|GOI|SGC|NPL|ULL|ULT|GAP|GAT)", "", b)
+    if cin_new and cin_cur and not same_co(cin_new, cin_cur):          # PTC -> PLC on conversion is the same company
+        where.warning(f"{f.name} is the RFS of another company ({pr_.get('name') or cin_new}, CIN {cin_new}); this project is "
+                      f"{ss.project.get('name') or ''} (CIN {cin_cur}). Nothing imported. To use it, start a new project (sidebar) first.")
+        return
     ss.project.update({k: v for k, v in pr_.items() if v not in (None, "", [], {})})
     ss.project.setdefault("notes", {}).update({k: v for k, v in nt_.items() if v not in (None, "", [], {})})
     ov_ = import_rfs.import_mapping(pth)                       # ledger -> masters used in the workbook
