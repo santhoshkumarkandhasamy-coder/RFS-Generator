@@ -473,8 +473,9 @@ def notes_ppe(cx):
                     "D": f"={FR}!{g0}{pr}/{S}", "E": f"={FR}!{pc['add:' + p]}{pr}/{S}", "F": f"={FR}!{pc['del:' + p]}{pr}/{S}", "G": f"=D{r}+E{r}-F{r}",
                     "H": f"=({FR}!{g0}{pr}-{FR}!{w0}{pr})/{S}", "I": f"={FR}!{pc['dep:' + p]}{pr}/{S}",
                     "J": f"=({FR}!{pc['del:' + p]}{pr}-{FR}!{pc['x:' + p]}{pr})/{S}", "K": f"=H{r}+I{r}-J{r}", "L": f"=D{r}-H{r}", "M": f"=G{r}-K{r}"}
+                fGreen = Font(name=TN, size=10, color="008000")      # values linked from 'FA Restatement'
                 for col, v in vals.items():
-                    w(ws, f"{col}{r}", v, fN, ACC, bd=B_LR)
+                    w(ws, f"{col}{r}", v, fGreen if col in "DEFHIJ" else fN, ACC, bd=B_LR)
                 w(ws, f"O{r}", f"=ROUND(M{r}-{FR}!{pc['w:' + p]}{pr}/{S},2)", fChk, ACC)
                 r += 1
             w(ws, f"C{r}", tot, fB, bd=B_ALL)
@@ -552,10 +553,11 @@ def _cwip(cx, ws, r):
         f0 = r
         for m in cw:
             w(ws, f"C{r}", m, fN, bd=B_LR)
-            w(ws, f"D{r}", "=" + cx.tb(prev, f"$C{r}"), fN, ACC, bd=B_LR)
-            w(ws, f"E{r}", "=" + cx.tb(p, f"$C{r}", col="C") + f"/{S}", fN, ACC, bd=B_LR)
+            fGreen = Font(name=TN, size=10, color="008000")
+            w(ws, f"D{r}", "=" + cx.tb(prev, f"$C{r}"), fGreen, ACC, bd=B_LR)
+            w(ws, f"E{r}", "=" + cx.tb(p, f"$C{r}", col="C") + f"/{S}", fGreen, ACC, bd=B_LR)
             w(ws, f"F{r}", f"=D{r}+E{r}-G{r}", fN, ACC, bd=B_LR)
-            w(ws, f"G{r}", "=" + cx.tb(p, f"$C{r}"), fN, ACC, bd=B_LR)
+            w(ws, f"G{r}", "=" + cx.tb(p, f"$C{r}"), fGreen, ACC, bd=B_LR)
             cx.CWIP_ROWS[(p, m)] = r
             r += 1
         w(ws, f"C{r}", "Total", fB, bd=B_ALL)
@@ -565,7 +567,7 @@ def _cwip(cx, ws, r):
     # ageing of intangible assets under development / CWIP (cost incurred in each period)
     for m, ttl in (("Intangible assets under development", "Ageing of intangible assets under development (projects in progress)"),
                    ("Capital work-in-progress", "Ageing of capital work-in-progress (projects in progress)")):
-        if not cx.nonzero(m):
+        if not cx.nonzero(m, cx.PK):              # ageing only when there is a balance at a period end
             continue
         w(ws, f"C{r}", ttl, fB)
         r += 1

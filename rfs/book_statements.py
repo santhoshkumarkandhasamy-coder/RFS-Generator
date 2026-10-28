@@ -1,5 +1,5 @@
 """Annexures I - V: BS_1, PL_2, CFS_3, SAP_4, SOA_5."""
-from openpyxl.styles import Font
+from openpyxl.styles import Font, Alignment
 from .book_core import *          # noqa: F401,F403
 from . import book_masters as BM
 from .book_notes import head
@@ -15,7 +15,7 @@ def signature(cx, ws, r, cL="B", cM="E", cR="G"):
     w(ws, f"{cM}{r}", "For and on behalf of the Board of Directors of", fB)
     r += 1
     w(ws, f"{cL}{r}", "Chartered Accountants")
-    w(ws, f"{cM}{r}", f"={MD}!$B$3")
+    w(ws, f"{cM}{r}", f"={MD}!$B$3", fB, ACC)
     r += 1
     w(ws, f"{cL}{r}", f'="Firm Registration No.: "&{MD}!$B$21')
     w(ws, f"{cM}{r}", f'="CIN: "&{MD}!$B$2')
@@ -58,8 +58,8 @@ def signature(cx, ws, r, cL="B", cM="E", cR="G"):
     return r
 
 
-def _row(cx, ws, r, label, f, keys, cols, font=fN, bd=None, note=None, lab_font=None):
-    w(ws, f"B{r}", label, lab_font or font, bd=bd if bd else None)
+def _row(cx, ws, r, label, f, keys, cols, font=fN, bd=None, note=None, lab_font=None, lab_bd=False):
+    w(ws, f"B{r}", label, lab_font or font, bd=bd if lab_bd else None)
     if note:
         w(ws, f"C{r}", note, fN, al=A_C)
     for k in keys:
@@ -68,7 +68,7 @@ def _row(cx, ws, r, label, f, keys, cols, font=fN, bd=None, note=None, lab_font=
             continue
         fo = font
         if k == "OPEN":
-            fo = Font(name=TN, size=10, italic=True, color="808080", bold=font.b)
+            fo = Font(name=TN, size=10, italic=True, color="808080")
         w(ws, f"{cols[k]}{r}", v, fo, ACC, bd=bd)
 
 
@@ -200,7 +200,7 @@ def _classes(cx):
 # ====================================================================== PL_2
 def pl2(cx):
     BC = cx.BC
-    ws = cx.sheet("PL_2", {"A": 1.0, "B": 52.0, "C": 11.0, **{BC[p]: 13.0 for p in cx.PK}}, print_cols=cx.LASTP)
+    ws = cx.sheet("PL_2", {"A": 1.0, "B": 60.0, "C": 11.0, **{BC[p]: 13.0 for p in cx.PK}}, print_cols=cx.LASTP)
     head(cx, ws, "ANNEXURE II - RESTATED SUMMARY STATEMENT OF PROFIT AND LOSS", cx.LASTP)
     keys = cx.PK
     w(ws, "B7", "Particulars", fB, bd=B_TB)
@@ -215,7 +215,7 @@ def pl2(cx):
 
     def put(name, label, f, note=None, font=fN, bd=None, lab_font=None):
         nonlocal r
-        _row(cx, ws, r, label, f, keys, BC, font, bd, note, lab_font)
+        _row(cx, ws, r, label, f, keys, BC, font, bd, note, lab_font, lab_bd=True)
         rows[name] = r
         r += 1
     w(ws, f"B{r}", "Income", fB)
@@ -264,7 +264,7 @@ def pl2(cx):
     r = signature(cx, ws, r, "B", BC[cx.PK[1]], BC[cx.PK[-1]])
     cx.PL = rows
     for k, v in rows.items():
-        cx.setref("pl_" + k, v)
+        cx.setref("PL2_" + k, v)
     cx.finish_print(ws, r)
 
 
@@ -273,8 +273,8 @@ def cfs3(cx):
     CC = cx.CC
     keys = cx.PK
     last = CC[keys[-1]]
-    ws = cx.sheet("CFS_3", {"A": 1.0, "B": 62.0, **{CC[p]: 13.0 for p in keys}}, print_cols=CL(CI(last) + 2))
-    head(cx, ws, "ANNEXURE III - RESTATED SUMMARY STATEMENT OF CASH FLOWS", CL(CI(last) + 2))
+    ws = cx.sheet("CFS_3", {"A": 1.0, "B": 62.0, **{CC[p]: 13.0 for p in keys}}, print_cols=last)
+    head(cx, ws, "ANNEXURE III - RESTATED SUMMARY STATEMENT OF CASH FLOWS", last)
     w(ws, "B8", "Particulars", fB, bd=B_TB)
     for k in keys:
         w(ws, f"{CC[k]}8", cx.dtxt(k, "pl"), fB, bd=B_TB, al=A_CW)
@@ -290,7 +290,7 @@ def cfs3(cx):
 
     def put(name, label, f, font=fN, bd=None):
         nonlocal r
-        _row(cx, ws, r, label, f, keys, CC, font, bd)
+        _row(cx, ws, r, label, f, keys, CC, font, bd, lab_bd=True)
         rows[name] = r
         r += 1
 
@@ -304,21 +304,22 @@ def cfs3(cx):
     oca_x = [x for x in ("oca_tax", "oca_int") if x in cx.refs]
     ppe_sale = lambda k: ("-(" + "+".join(f"{NP}!{nc(k)}{x}" for x in cx.OI_PPE_ROWS) + ")") if cx.OI_PPE_ROWS else "0"
     loss_led = (cx.I.get("cfs") or {}).get("ppe_loss_ledgers") or []
-    ppe_loss = lambda k: ("+(" + "+".join(cx.tbl(k, l) for l in loss_led) + ")") if loss_led else ""
+    fa_c = (lambda k: f"-'FA Restatement'!{cx.FBC[k]}{cx.FBR['c']}") if getattr(cx, "FBR", None) else (lambda k: "")
+    ppe_loss = lambda k: (("+(" + "+".join(cx.tbl(k, l) for l in loss_led) + ")") if loss_led else "") + fa_c(k)   # restated loss = books - (c)
 
     hdr("A) Cash flows from operating activities")
     put("pbt", "Net profit before tax", lambda k: f"=PL_2!{BC[k]}{cx.PL['pbt']}")
-    hdr("Adjustments for:")
+    w(ws, f"B{r}", "Adjustments for:")
+    r += 1
     a0 = rows["pbt"]
     put("dep", "Depreciation and amortisation expense", lambda k: f"=PL_2!{BC[k]}{cx.PL['dep']}")
     put("fin", "Finance costs", lambda k: f"=PL_2!{BC[k]}{cx.PL['fin']}")
     put("int", "Interest income", lambda k: f"=-{intinc(k)}")
     put("ppe", "(Profit) / loss on sale or write off of property, plant and equipment, and adjustments made directly in reserves",
         lambda k: f"={ppe_sale(k)}{ppe_loss(k)}")
-    ws.row_dimensions[rows["ppe"]].height = 27
-    ws[f"B{rows['ppe']}"].alignment = A_W
     put("op", "Operating profit before working capital changes", lambda k: f"=SUM({CC[k]}{a0}:{CC[k]}{r - 1})", font=fB, bd=B_T)
-    hdr("Adjustments for changes in working capital:")
+    w(ws, f"B{r}", "Adjustments for changes in working capital:")
+    r += 1
     w0 = r
     put("winv", "(Increase) / decrease in inventories", lambda k: f"={bs(pv(k), 'inv')}-{bs(k, 'inv')}")
     put("wtr", "(Increase) / decrease in trade receivables", lambda k: f"={bs(pv(k), 'tr')}-{bs(k, 'tr')}")
@@ -333,7 +334,7 @@ def cfs3(cx):
     prov = lambda k: "+".join(x for x in (bs(k, "ltp") if "ltp" in B else "", bs(k, "oltl") if "oltl" in B else "") if x) or "0"
     put("wprov", "Increase / (decrease) in provisions and other long-term liabilities",
         lambda k: f"=({prov(k)}{gcur(k)})-({prov(pv(k))}{gcur(pv(k))})")
-    put("cgo", "Cash generated from operations", lambda k: f"=SUM({CC[k]}{rows['op']}:{CC[k]}{r - 1})")
+    put("cgo", "Cash generated from operations", lambda k: f"=SUM({CC[k]}{rows['op']}:{CC[k]}{r - 1})", font=fB, bd=B_T)
     stp = (lambda k: f"+({NL}!{nc(k)}{{{{stp_tax}}}}-{NL}!{nc(pv(k))}{{{{stp_tax}}}})") if not getattr(cx, "no_stp_tax", False) else (lambda k: "")
     advt = (lambda k: f"-({NA}!{nc(k)}{{{{oca_tax}}}}-{NA}!{nc(pv(k))}{{{{oca_tax}}}})") if "oca_tax" in cx.refs else (lambda k: "")
     put("tax", "Income taxes paid (net of refunds)", lambda k: f"=-PL_2!{BC[k]}{cx.PL['tt']}{stp(k)}{advt(k)}-({bs(k, 'dta')}-{bs(pv(k), 'dta')})")
@@ -345,8 +346,6 @@ def cfs3(cx):
     fasum = lambda k: "(" + "+".join(bs(k, x) for x in fa) + ")"
     put("capex", "Purchase of property, plant and equipment and intangible assets (net of sale proceeds)",
         lambda k: f"=-({fasum(k)}-{fasum(pv(k))}+PL_2!{BC[k]}{cx.PL['dep']})-{CC[k]}{rows['ppe']}")
-    ws[f"B{rows['capex']}"].alignment = A_W
-    ws.row_dimensions[rows["capex"]].height = 27
     if "fd_line" in cx.refs:
         put("fd", "(Investment in) / redemption of fixed deposits with banks", lambda k: f"={NA}!{nc(pv(k))}{{{{fd_line}}}}-{NA}!{nc(k)}{{{{fd_line}}}}")
     oint = (lambda k: f"-({NA}!{nc(k)}{{{{oca_int}}}}-{NA}!{nc(pv(k))}{{{{oca_int}}}})") if "oca_int" in cx.refs else (lambda k: "")
@@ -379,7 +378,7 @@ def cfs3(cx):
     t = cx.text("cfs_note", "Note: The Cash Flow Statement has been prepared under the indirect method as set out in Accounting Standard 3 'Cash Flow Statements'. "
                             "Bank overdrafts are shown under short-term borrowings and their movement is included in financing activities.")
     w(ws, f"B{r}", t, fN, al=A_J)
-    ws.merge_cells(f"B{r}:{CL(CI(last) + 2)}{r + 1}")
+    ws.merge_cells(f"B{r}:{last}{r + 1}")
     r += 3
     r = signature(cx, ws, r, "B", CC[keys[1]], CC[keys[-1]])
     cx.CFS = rows
@@ -525,7 +524,7 @@ def soa5(cx):
     w(ws, f"B{r}", 1, fB, al=A_L)
     w(ws, f"C{r}", "Reconciliation of restated profits", fB)
     r += 2
-    w(ws, f"C{r}", "Particulars", fB, bd=B_TB)
+    w(ws, f"C{r}", "Particulars", fB, bd=B_TB, al=A_CW)
     w(ws, f"D{r}", "Note", fB, bd=B_TB, al=A_C)
     for k in keys:
         w(ws, f"{SC[k]}{r}", cx.dtxt(k, "pl"), fB, bd=B_TB, al=A_CW)
@@ -536,7 +535,7 @@ def soa5(cx):
     for k in keys:
         w(ws, f"{SC[k]}{r}", f"='Notes_P&L'!{cx.NC[k]}{{{{pl_bookpat}}}}", fB, ACC)
     r += 1
-    w(ws, f"C{r}", "Adjustments for:", fBI)
+    w(ws, f"C{r}", "Adjustments for:", fB)
     r += 1
     groups = cx.soa_pl_groups()
     letters = "ABCDEFGHIJKLMNOP"
@@ -561,7 +560,7 @@ def soa5(cx):
     w(ws, f"C{r}", "Net profit / (loss) after tax as per Restated Summary Statements", fB, bd=B_TB)
     for i, k in enumerate(keys):
         w(ws, f"{SC[k]}{r}", f"={SC[k]}{rb}+{SC[k]}{rn}", fB, ACC, bd=B_TB)
-        w(ws, f"{CL(CI(lastn) + i)}{r}", f"=ROUND({SC[k]}{r}-PL_2!{cx.BC[k]}{cx.PL['pat']},2)", fChkI, ACC)
+        w(ws, f"{CL(CI(lastn) + i)}{r}", f"=ROUND({SC[k]}{r}-PL_2!{cx.BC[k]}{cx.PL['pat']},2)", Font(name=TN, size=8, italic=True), ACC)
     r += 1
     star = (f"* For the period ended {long_date(cx.stub)}: net profit as per the books of account (unaudited; no provision for tax made in the books for the "
             "interim period).") if cx.stub else "* As per the audited financial statements."
@@ -580,7 +579,7 @@ def soa5(cx):
     w(ws, f"B{r}", 2, fB, al=A_L)
     w(ws, f"C{r}", "Reconciliation of restated shareholders' funds", fB)
     r += 2
-    w(ws, f"C{r}", "Particulars", fB, bd=B_TB)
+    w(ws, f"C{r}", "Particulars", fB, bd=B_TB, al=A_CW)
     w(ws, f"D{r}", "Note", fB, bd=B_TB, al=A_C)
     for k in keys + ["OPEN"]:
         w(ws, f"{SC[k]}{r}", cx.dtxt(k), fB, bd=B_TB, al=A_CW)
@@ -591,7 +590,7 @@ def soa5(cx):
     for k in keys + ["OPEN"]:
         w(ws, f"{SC[k]}{r}", "=" + cx.tb(k, qs("Equity share capital")) + "+" + cx.tb(k, qs("Reserves and surplus")), fB, ACC)
     r += 1
-    w(ws, f"C{r}", "Adjustments:", fBI)
+    w(ws, f"C{r}", "Adjustments:", fB)
     r += 1
     bgroups = cx.soa_bs_groups()
     b0 = r
@@ -616,7 +615,7 @@ def soa5(cx):
     chk0 = CI(lastn) + 1
     for i, k in enumerate(keys + ["OPEN"]):
         w(ws, f"{SC[k]}{r}", f"={SC[k]}{ra}+{SC[k]}{rt}", fB, ACC, bd=B_TB)
-        w(ws, f"{CL(chk0 + i)}{r}", f"=ROUND({SC[k]}{r}-BS_1!{cx.BC[k]}{cx.BS['shf']},2)", fChkI, ACC)
+        w(ws, f"{CL(chk0 + i)}{r}", f"=ROUND({SC[k]}{r}-BS_1!{cx.BC[k]}{cx.BS['shf']},2)", Font(name=TN, size=8, italic=True), ACC)
     cx.setref("soa_sh_restated", r)
     r += 1
     star = (f"* For {long_date(cx.stub)}: as per the books of account (unaudited). " if cx.stub else "* ") + \
@@ -647,6 +646,11 @@ def soa5(cx):
     t = cx.text("soa_nonadj", f"There are no audit qualifications in the auditor's reports for the years ended {yrs} which require any adjustment in the "
                               "Restated Summary Statements.")
     merge(ws, f"C{r}:{lastn}{r}", t, fN, A_J, est_height(t, 52 + 7 + 16 * (cx.N + 1)))
+    for row in ws.iter_rows(min_col=3, max_col=5):          # line labels wrap as in the final format (not headings / sub-totals)
+        c = row[0]
+        if (c.value is not None and c.alignment.horizontal != "justify" and row[2].value is not None
+                and not str(c.value).startswith(("Net adjustment", "Total adjustments"))):
+            c.alignment = Alignment(horizontal=c.alignment.horizontal, vertical=c.alignment.vertical, wrap_text=True)
     cx.finish_print(ws, r + 1)
 
 

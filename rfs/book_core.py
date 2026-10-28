@@ -263,12 +263,12 @@ class Ctx:
             ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
             ws.page_setup.fitToWidth = 1
             ws.page_setup.fitToHeight = 0
-        ws._print_cols = print_cols
+        ws._rfs_pc = print_cols
         return ws
 
     def finish_print(self, ws, last_row):
-        if getattr(ws, "_print_cols", None):
-            ws.print_area = f"A1:{ws._print_cols}{last_row}"
+        if getattr(ws, "_rfs_pc", None):
+            ws.print_area = f"A1:{ws._rfs_pc}{last_row}"
 
 
 def w(ws, ref, v, font=fN, fmt=None, al=None, bd=None, fill=None):

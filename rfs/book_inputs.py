@@ -326,7 +326,7 @@ def adj_sheet(cx):
         for i, ln in enumerate(ent["lines"]):
             d = ent["date"]
             if i == 0:
-                w(ws, f"A{r}", d if isinstance(d, str) else ddate(d), fBlue if ent.get("manual") else fN, DMY)
+                w(ws, f"A{r}", d if isinstance(d, str) and d.startswith("=") else ddate(d), fBlue if ent.get("manual") else fN, DMY)
             else:
                 w(ws, f"A{r}", f"=A{r0}", fN, DMY)
             to = ln.get("to")

@@ -94,8 +94,14 @@ def rpt(cx):
             continue
         ns.sub(title, fBI)
         f0 = ns.r
+        ovr = (R.get("loan_overrides") or {}).get(kind) or {}      # figures as disclosed in the audited statements, where they differ
         for m, rr0 in mv.items():
-            ns.line(m.replace(BM.DIRECTOR_PREFIX, ""), lambda p, r, rr0=rr0: f"=Notes_Liabilities!{cx.NC[p]}{rr0}")
+            nm = m.replace(BM.DIRECTOR_PREFIX, "")
+            o = ovr.get(nm) or {}
+            rr = ns.line(nm, lambda p, r, rr0=rr0, o=o: rs_f(o[p], S, 4) if _n(o.get(p)) is not None else f"=Notes_Liabilities!{cx.NC[p]}{rr0}")
+            for p in cx.PK:
+                if _n(o.get(p)) is not None:
+                    _blue(ws, f"{cx.NC[p]}{rr}")
         for x in extra:
             ns.line(x["name"], lambda p, r, x=x: rs_f(x.get(p), S, 4) or 0)
         ns.total(f0, ns.r - 1, bd=B_TB)
@@ -292,7 +298,13 @@ def gratuity(cx):
             _blue(ws, f"{cx.NC[p]}{rcur}")
     ns.line(f"Non-current (included in long-term provisions - Note {ns_})", lambda p, r: f"={cx.NC[p]}{r + 1}-{cx.NC[p]}{r - 1}")
     PG = "Provision for gratuity"
-    ns.line("Total provision for gratuity", lambda p, r: "=" + cx.master_val(p, PG, qs(PG), "BS", "Cr"), font=fB, bd=B_TB)
+    rtp = ns.line("Total provision for gratuity", lambda p, r: "=" + cx.master_val(p, PG, qs(PG), "BS", "Cr"), font=fB, bd=B_TB)
+    if not getattr(cx, "no_grat", False) and "ltp_grat" in cx.refs:
+        for i, k in enumerate(cx.PK + ["OPEN"]):
+            w(ws, f"{CL(6 + cx.N + i)}{rtp}", f"=ROUND({cx.NC[k]}{rtp}-Notes_Liabilities!{cx.NC[k]}{{{{ltp_grat}}}}-Notes_Liabilities!{cx.NC[k]}{{{{grat_cur}}}},2)",
+              fChk, ACC)
+    for i, p in enumerate(FY):           # closing obligation as per valuation = provision restated
+        w(ws, f"{CL(6 + cx.N + i)}{rc}", f"=ROUND({fcol[p]}{rc}-{cx.NC[p]}{rtp},2)", fChk, ACC)
     ns.gap()
     ns.sub("g) Experience adjustments")
     fyhead("bs")
@@ -405,7 +417,8 @@ def tax_comp(cx):
                 return "Interim period" if p == "S" else f"{cx.DATE[p].year}-{str(cx.DATE[p].year + 1)[2:]}"
             return v
         ri[j] = ns.line(lbl, f, fmt=ACC0 if j >= 3 else None)
-    ns.line("Current tax as per return / computation (Rs. in lakhs)", lambda p, r: f"=PL_2!{cx.BC[p]}{PL['ct']}", font=fB, bd=B_TB)
+    ns.line("Current tax as per return / computation (Rs. in lakhs)", lambda p, r: f"=IF(ISNUMBER({cx.NC[p]}{ri[4]}),{cx.NC[p]}{ri[4]}/{S},PL_2!{cx.BC[p]}{PL['ct']})",
+            font=fB, bd=B_TB)
     ns.line("Difference between total income as per return / computation and taxable income computed above",
             lambda p, r: f"=IF(ISNUMBER({cx.NC[p]}{ri[3]}),ROUND({cx.NC[p]}{ri[3]}/{S}-{cx.NC[p]}{rg},2),\"\")")
     cx.finish_print(ws, ns.r)
@@ -829,7 +842,7 @@ def additional(cx):
             thead()
             FX = I.get("foreign") or {}
             for i, (lbl, k) in enumerate((("A. CIF value of imports (stock-in-trade)", "imports"), ("B. Earnings in foreign exchange (FOB value of exports)", "exports"),
-                                          ("C. Expenditure in foreign currency", "expenditure"))):
+                                          (FX.get("expenditure_label") or "C. Expenditure in foreign currency", "expenditure"))):
                 w(ws, f"C{r}", lbl, fN, bd=B_B if i == 2 else None)
                 for p in cx.PK:
                     v = (FX.get(k) or {}).get(p)

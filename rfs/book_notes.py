@@ -211,7 +211,7 @@ def notes_equity(cx):
     ro = ns.r
     other = [m for m in (I.get("reserve_movements") or [])]
     ns.line("Opening balance", lambda p, r: f"={cx.NC[cx.PREV[p]]}{{{{rs_end}}}}", opening=False)
-    ns.line("Add: Restated profit for the year / period", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{pl_pat}}}}", opening=False)
+    ns.line("Add: Restated profit for the year / period", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{PL2_pat}}}}", opening=False)
     for mv in other:
         ns.line(mv["label"], lambda p, r, mv=mv: f"={float(mv.get(p) or 0)}/{S}" if mv.get(p) else 0, opening=False)
     rs = ns.r
@@ -219,6 +219,13 @@ def notes_equity(cx):
             + "-(" + _adj_pl_total(cx, "OPEN") + "))")
     ns.line("Balance at the end of the year / period", lambda p, r: op_f if p == "OPEN" else f"=SUM({cx.NC[p]}{ro}:{cx.NC[p]}{r - 1})",
             font=fB, bd=B_TB2, ref="rs_end")
+    # movements in the books' reserves other than the profit for the period must be reversed by restatement entries
+    w(ws, f"C{ns.r}", "Check: movements in reserves in the books other than profit, not reversed by restatement entries (should be nil)", fChkI)
+    RSq = qs("Reserves and surplus")
+    for p in cx.PK:
+        w(ws, f"{cx.NC[p]}{ns.r}", f"=ROUND({cx.tb(p, RSq)}-{cx.tb(cx.PREV[p], RSq)}-{cx.tb(p, qs('Net profit as per books'))}"
+                                   f"+{cx.adj_pl(RSq, p, 'Cr')},2)", fChk, ACC)
+    ns.r += 1
     w(ws, f"{CL(5 + cx.N)}{rs}", "Check vs Annexure V", fChkI)
     for i, p in enumerate(cx.PK):
         w(ws, f"{CL(6 + cx.N + i)}{rs}", f"=ROUND({cx.NC[p]}{rs}+{cx.NC[p]}{rt}-SOA_5!{cx.SC[p]}{{{{soa_sh_restated}}}},2)", fChk, ACC)
@@ -432,7 +439,7 @@ def notes_liabilities(cx):
     f0 = ns.r
     for m, _ in BM.note_lines("OCL", cx.custom):
         ns.master_line(m, ref="ocl_msme_int" if m == MI else None)
-    if MI not in cx.refs:
+    if "ocl_msme_int" not in cx.refs:
         cx.setref("ocl_msme_int", f0)
     ns.total(f0, ns.r - 1, ref="ocl_total")
     ns.gap()
@@ -555,12 +562,12 @@ def notes_assets(cx):
         base = cx.DEB[p]
         for k, lbl in enumerate(["Undisputed trade receivables - considered good", "Undisputed trade receivables - considered doubtful",
                                  "Disputed trade receivables - considered good", "Disputed trade receivables - considered doubtful"]):
-            w(ws, f"C{r}", lbl, fN, bd=B_LR)
+            w(ws, f"C{r}", lbl, fN, bd=B_LR, al=A_LW)
             for j in range(5):
                 w(ws, f"{CL(4 + j)}{r}", f"={q('Debtor Ageing')}!{CL(3 + j)}{base + k}/{S}", fN, ACC, bd=B_LR)
             w(ws, f"I{r}", f"=SUM(D{r}:H{r})", fN, ACC, bd=B_LR)
             r += 1
-        w(ws, f"C{r}", "Less: Allowance for bad and doubtful debts", fN, bd=B_LR)
+        w(ws, f"C{r}", "Less: Allowance for bad and doubtful debts", fN, bd=B_LR, al=A_LW)
         for j in range(5):
             w(ws, f"{CL(4 + j)}{r}", 0, fN, ACC, bd=B_LR)
         w(ws, f"I{r}", f"=SUM(D{r}:H{r})", fN, ACC, bd=B_LR)
@@ -569,7 +576,7 @@ def notes_assets(cx):
         for j in range(6):
             c = CL(4 + j)
             w(ws, f"{c}{r}", f"=SUM({c}{f1}:{c}{r - 1})", fB, ACC, bd=B_ALL)
-        w(ws, f"J{r}", f"=ROUND(I{r}-{cx.NC[p]}{rtr},2)", fChk, ACC)
+        w(ws, f"J{r}", f"=ROUND(I{r}-{cx.NC[p]}{rtr},2)", fChkI, ACC)
         ns.r = r + 2
     # ---- 17 cash and bank balances
     ns.note("CASH", "Cash and bank balances")
@@ -681,7 +688,7 @@ def notes_pl(cx):
     for i, p in enumerate(cx.PK):        # check: ledger-wise lines agree with the Other income masters
         tot = "+".join(cx.tb(p, qs(m)) for m, _ in BM.note_lines("OI", cx.custom))
         w(ws, f"{CL(5 + cx.N + i + 1)}{rt}", f"=ROUND({cx.NC[p]}{rt}-({tot}),2)", fChk, ACC)
-    ns.line("Restated profit before tax", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{pl_pbt}}}}", font=fI)
+    ns.line("Restated profit before tax", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{PL2_pbt}}}}", font=fI)
     ns.line("Other income as a percentage of restated profit before tax", lambda p, r: f"=IFERROR({cx.NC[p]}{rt}/{cx.NC[p]}{r - 1},0)", font=fI, fmt=PCT)
     ns.para(cx.text("oi_note", "Interest income on fixed deposits and income tax refund is recurring in nature and not related to the main business activity. "
                     "Other non-operating income (discount received, balances written back, exchange gain) is non-recurring in nature."))
@@ -714,10 +721,10 @@ def notes_pl(cx):
     # ---- 29 earnings per share
     ns.note("EPS", "Earnings per share")
     ns.colhead("pl")
-    ns.line("Restated profit for the year attributable to equity shareholders", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{pl_pat}}}}")
+    ns.line("Restated profit for the year attributable to equity shareholders", lambda p, r: f"=PL_2!{cx.BC[p]}{{{{PL2_pat}}}}")
     ns.line("Weighted average number of equity shares (adjusted for bonus / split)", lambda p, r: f"='Accounting ratios'!{cx.NC[p]}{{{{ar_wans_adj}}}}",
-            fmt=ACC0)
-    ns.line("Basic and diluted earnings per share (Rs.)", lambda p, r: f"='Accounting ratios'!{cx.NC[p]}{{{{ar_eps}}}}", font=fB, fmt=ACC, ref="pl_eps")
-    ns.line("Face value per equity share (Rs.)", lambda p, r: f"={MD}!$B$7", fmt=ACC)
+            fmt=NUM0)
+    ns.line("Basic and diluted earnings per share (Rs.)", lambda p, r: f"='Accounting ratios'!{cx.NC[p]}{{{{ar_eps}}}}", font=fB, fmt=EPS, ref="pl_eps")
+    ns.line("Face value per equity share (Rs.)", lambda p, r: f"={MD}!$B$7", fmt=EPS)
     cx.finish_print(ws, ns.r)
     return ns
