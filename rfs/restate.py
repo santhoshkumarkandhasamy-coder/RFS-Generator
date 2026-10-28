@@ -87,8 +87,55 @@ def read_fa_register(path, work_dir=None):
     return best
 
 
+def _msme_xlsx(path):
+    """Excel computation: the sheet with an 'Interest due' column; interest = sum over the bill rows (rows with a party name),
+    period end = the latest date above the heading row (else the year in the file name)"""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, data_only=True)
+    sheets = sorted(wb.worksheets, key=lambda w: 0 if "interest" in w.title.lower() else 1 if "msme" in w.title.lower() else 2)
+    for ws in sheets:
+        rows = [list(r) for r in ws.iter_rows(max_col=min(ws.max_column, 40), values_only=True)]
+        for hi, r in enumerate(rows[:20]):
+            head = [re.sub(r"\s+", " ", str(c or "")).strip().lower() for c in r]
+            j = next((i for i, h in enumerate(head) if re.search(r"interest (due|payable|amount|u/s ?16)", h)), None)
+            if j is None:
+                j = next((i for i, h in enumerate(head) if h == "interest"), None)
+            if j is None:
+                continue
+            pj = next((i for i, h in enumerate(head) if re.search(r"party|supplier|vendor|creditor|name", h)), None)
+            end = None
+            for rr in rows[:hi]:
+                for c in rr:
+                    d = c.date() if isinstance(c, dt.datetime) else c if isinstance(c, dt.date) else _parse_date(c) if isinstance(c, str) else None
+                    if d and (end is None or d > end):
+                        end = d
+            tot, n = 0.0, 0
+            for rr in rows[hi + 1:]:
+                if pj is not None and not str((rr[pj] if pj < len(rr) else None) or "").strip():
+                    continue                       # totals / notes below the bills
+                if pj is not None and re.search(r"^(grand )?total", str(rr[pj]).strip(), re.I):
+                    continue
+                v = rr[j] if j < len(rr) else None
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    tot += v; n += 1
+            if n:
+                return round(tot, 2), end
+    return None, None
+
+
 def read_msme_interest(path, work_dir=None):
     """(interest for the period in Rs, period end date or None) from an MSME interest computation workbook."""
+    if str(path).lower().endswith((".xlsx", ".xlsm")):
+        try:
+            total, end = _msme_xlsx(path)
+        except Exception:
+            total, end = None, None
+        if total is not None:
+            if end is None:
+                m = re.search(r"(?<!\d)(20)?(\d{2})\s*[-_ ]\s*(\d{2})(?!\d)", os.path.basename(path))
+                if m:
+                    end = dt.date(int(m.group(3)) + 2000, 3, 31)
+            return total, end
     total, end = None, None
     for t in extract_tables(path, work_dir):
         for r in t[:8]:                       # the computation date is usually in the heading

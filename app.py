@@ -1043,9 +1043,65 @@ def _per_table(key, label, keys, lab_fn):
     """One-column editable table (Rs) keyed by date keys; stored in RST[key]."""
     store = RST.setdefault(key, {})
     df_ = pd.DataFrame({"Period / date": [lab_fn(k) for k in keys], label: [store.get(k) for k in keys]})
-    e = st.data_editor(df_, hide_index=True, width="stretch", key="rst_" + key, disabled=["Period / date"],
+    e = st.data_editor(df_, hide_index=True, width="stretch", key=f"rst_{key}_{ss.get('_rst_n', 0)}", disabled=["Period / date"],
                        column_config={label: st.column_config.NumberColumn(label, format="%.2f")})
     RST[key] = {k: (None if pd.isna(v) else float(v)) for k, v in zip(keys, e[label])}
+
+
+def _attach(key, kind, keys):
+    """'Attach file' box for one restatement section: each file is read (amount and period) and put in RST[key];
+    the period chosen here is used when the file does not show it. The file is also kept as a supporting document."""
+    types = {"msme": ["xlsx", "xlsm", "xls", "csv", "pdf"], "gratuity": ["pdf", "docx", "xlsx", "txt"], "tax": ["pdf", "xlsx", "docx", "txt", "json"]}[kind]
+    c1, c2 = st.columns([3, 2])
+    ups = c1.file_uploader("Attach file(s)", type=types, accept_multiple_files=True, key=f"att_{key}_{ss.get('_rst_n', 0)}",
+                           help="Reads the amount and the period from the file; edit the table below if needed.")
+    lab = {k_: date_lab(k_) for k_ in keys}
+    per = c2.selectbox("Period, if the file does not show it", ["(from the file)"] + list(lab.values()), key=f"attp_{key}")
+    done = ss.setdefault("_att_done", set())
+    msgs, changed = [], False
+    for up in ups or []:
+        sig = (key, up.name, up.size, per)
+        if sig in done:
+            continue
+        done.add(sig)
+        ddir = os.path.join(ss.workdir, "docs"); os.makedirs(ddir, exist_ok=True)
+        pth = os.path.join(ddir, up.name)
+        with open(pth, "wb") as fh:
+            fh.write(up.getbuffer())
+        try:
+            txt = docreader.extract_text(pth, ddir) if kind != "msme" else ""
+        except Exception:
+            txt = ""
+        ss.docs[up.name] = {"path": pth, "type": os.path.splitext(up.name)[1].lstrip(".").upper(), "text": txt, "category": "",
+                            "added": dt.date.today().isoformat()}
+        forced = next((k_ for k_, v_ in lab.items() if v_ == per), None)
+        try:
+            if kind == "msme":
+                amt, end = restate.read_msme_interest(pth, ss.workdir)
+                found = {end: amt} if amt is not None else {}
+            elif kind == "tax":
+                amt, end = restate.read_tax(txt)
+                found = {end: amt} if amt is not None else {}
+            else:
+                found = {dt.date.fromisoformat(i_): a_ for i_, a_ in restate.read_gratuity(txt).items()}
+        except Exception as e:
+            msgs.append(f"{up.name}: could not be read ({e})"); continue
+        if not found:
+            msgs.append(f"{up.name}: no amount found - enter it in the table below"); continue
+        for d_, a_ in found.items():
+            k_ = forced if (forced and len(found) == 1) else (key_for_date(d_) if d_ else None)
+            if k_ not in keys:
+                msgs.append(f"{up.name}: Rs {a_:,.2f}" + (f" as at {d_:%d-%m-%Y}" if d_ else "") +
+                            " - the period is not one of the RFS dates; choose the period on the right and attach it again"); continue
+            RST.setdefault(key, {})[k_] = a_
+            changed = True
+            msgs.append(f"{up.name}: Rs {a_:,.2f} -> {lab[k_]}")
+    if changed:                  # the table is redrawn with the values read; the messages are shown after the rerun
+        ss["_att_msg_" + key] = msgs
+        ss._rst_n = ss.get("_rst_n", 0) + 1
+        st.rerun()
+    for m_ in msgs + ss.pop("_att_msg_" + key, []):
+        (st.success if "->" in m_ else st.warning)(m_)
 
 
 def date_lab(k):
@@ -1151,6 +1207,7 @@ with rst_tab:
                     if kk:
                         RST.setdefault("dbo", {})[kk] = amt; found += 1
             (st.success if found else st.info)(f"{found} valuation(s) read." if found else "No actuarial valuation found - enter the figures below.")
+        _attach("dbo", "gratuity", [OPEN_KEY] + per_keys)
         st.caption("Defined benefit obligation as per the actuarial valuation at each date (Rs). All dates are needed, including the opening date.")
         _per_table("dbo", "Obligation (Rs)", [OPEN_KEY] + per_keys, date_lab)
         st.caption("Gratuity charged directly to reserves in the books during the period (Rs) - reclassified to the Statement of Profit and Loss:")
@@ -1160,12 +1217,15 @@ with rst_tab:
         if st.button("Read from MSME interest computations in supporting documents", key="m_read"):
             found = 0
             for k_, d_ in ss.docs.items():
-                if re.search(r"msme|micro|interest", k_, re.I) and d_.get("path") and d_["path"].lower().endswith((".xlsx", ".xlsm", ".xls", ".csv")):
+                if d_.get("path") and d_["path"].lower().endswith((".xlsx", ".xlsm", ".xls", ".csv")):
                     amt, end = restate.read_msme_interest(d_["path"], ss.workdir)
                     kk = key_for_date(end) if end else None
                     if amt is not None and kk:
                         RST.setdefault("msme", {})[kk] = amt; found += 1
+            if found:
+                ss._rst_n = ss.get("_rst_n", 0) + 1
             (st.success if found else st.info)(f"{found} computation(s) read." if found else "No MSME computation found - enter the figures below.")
+        _attach("msme", "msme", per_keys)
         st.caption("Interest on delayed payments to micro and small enterprises for each period (Rs). The entry posts the difference from the "
                    "interest already booked. Not deductible (Section 23), so no deferred tax.")
         _per_table("msme", "MSME interest (Rs)", per_keys, date_lab)
@@ -1180,6 +1240,7 @@ with rst_tab:
                     if amt is not None and kk:
                         RST.setdefault("tax", {})[kk] = amt; found += 1
             (st.success if found else st.info)(f"{found} return(s) read." if found else "No return found - enter the figures below.")
+        _attach("tax", "tax", [k for k in per_keys if k != "dS"])
         st.caption("Current tax as per the return / computation (Rs); blank = no adjustment. The entry posts the difference from the tax provided in the books.")
         _per_table("tax", "Tax as per return (Rs)", [k for k in per_keys if k != "dS"], date_lab)
         if stub_end:
